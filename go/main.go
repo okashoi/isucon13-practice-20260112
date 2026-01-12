@@ -63,6 +63,7 @@ func connectDB(logger echo.Logger) (*sqlx.DB, error) {
 	conf.Passwd = "isucon"
 	conf.DBName = "isupipe"
 	conf.ParseTime = true
+	conf.InterpolateParams = true
 
 	if v, ok := os.LookupEnv(networkTypeEnvKey); ok {
 		conf.Net = v
@@ -133,6 +134,7 @@ func main() {
 	e.Use(session.Middleware(cookieStore))
 	// e.Use(middleware.Recover())
 
+    echov4.EnableDebugHandler(e)
 	// 初期化
 	e.POST("/api/initialize", initializeHandler)
 
