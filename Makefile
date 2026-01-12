@@ -1,5 +1,5 @@
 APPNAME := isupipe-go.service
-ISUCON3_HOST := isucon-3
+ISUCON3_HOST := isucon-s3
 ISUCON3_DEST := /home/isucon/webapp/go/isupipe
 
 .PHONY: *
