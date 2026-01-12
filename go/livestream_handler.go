@@ -111,12 +111,8 @@ func reserveLivestreamHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get reservation_slots: "+err.Error())
 	}
 	for _, slot := range slots {
-		var count int
-		if err := tx.GetContext(ctx, &count, "SELECT slot FROM reservation_slots WHERE start_at = ? AND end_at = ?", slot.StartAt, slot.EndAt); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get reservation_slots: "+err.Error())
-		}
 		c.Logger().Infof("%d ~ %d予約枠の残数 = %d\n", slot.StartAt, slot.EndAt, slot.Slot)
-		if count < 1 {
+		if slot.Slot < 1 {
 			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("予約期間 %d ~ %dに対して、予約区間 %d ~ %dが予約できません", termStartAt.Unix(), termEndAt.Unix(), req.StartAt, req.EndAt))
 		}
 	}
@@ -197,13 +193,18 @@ func searchLivestreamsHandler(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get keyTaggedLivestreams: "+err.Error())
 		}
 
-		for _, keyTaggedLivestream := range keyTaggedLivestreams {
-			ls := LivestreamModel{}
-			if err := tx.GetContext(ctx, &ls, "SELECT * FROM livestreams WHERE id = ?", keyTaggedLivestream.LivestreamID); err != nil {
+		if len(keyTaggedLivestreams) > 0 {
+			livestreamIDs := make([]int64, len(keyTaggedLivestreams))
+			for i, ktl := range keyTaggedLivestreams {
+				livestreamIDs[i] = ktl.LivestreamID
+			}
+			query, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?) ORDER BY id DESC", livestreamIDs)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query for livestreams: "+err.Error())
+			}
+			if err := tx.SelectContext(ctx, &livestreamModels, query, args...); err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
 			}
-
-			livestreamModels = append(livestreamModels, &ls)
 		}
 	} else {
 		// 検索条件なし
@@ -503,12 +504,16 @@ func fillLivestreamsResponse(ctx context.Context, tx *sqlx.Tx, livestreamModels 
 		return []Livestream{}, nil
 	}
 
-	// owner の user_id を収集
-	userIDs := make([]int64, len(livestreamModels))
+	// owner の user_id を収集（重複排除）
+	userIDSet := make(map[int64]struct{})
 	livestreamIDs := make([]int64, len(livestreamModels))
 	for i, ls := range livestreamModels {
-		userIDs[i] = ls.UserID
+		userIDSet[ls.UserID] = struct{}{}
 		livestreamIDs[i] = ls.ID
+	}
+	userIDs := make([]int64, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
 	}
 
 	// users を一括取得

@@ -553,10 +553,14 @@ func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel)
 		return []User{}, nil
 	}
 
-	// ユーザーIDを収集
-	userIDs := make([]int64, len(userModels))
-	for i, u := range userModels {
-		userIDs[i] = u.ID
+	// ユーザーIDを収集（重複排除）
+	userIDSet := make(map[int64]struct{})
+	for _, u := range userModels {
+		userIDSet[u.ID] = struct{}{}
+	}
+	userIDs := make([]int64, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
 	}
 
 	// themes を一括取得

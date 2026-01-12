@@ -371,29 +371,31 @@ func moderateHandler(c echo.Context) error {
 	}
 
 	// NGワードにヒットする過去の投稿も全削除する
-	for _, ngword := range ngwords {
-		// ライブコメント一覧取得
-		var livecomments []*LivecommentModel
-		if err := tx.SelectContext(ctx, &livecomments, "SELECT * FROM livecomments"); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
-		}
+	// ライブコメント一覧取得（このlivestreamのみ、一度だけ取得）
+	var livecomments []*LivecommentModel
+	if err := tx.SelectContext(ctx, &livecomments, "SELECT * FROM livecomments WHERE livestream_id = ?", livestreamID); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
+	}
 
-		for _, livecomment := range livecomments {
-			query := `
-			DELETE FROM livecomments
-			WHERE
-			id = ? AND
-			livestream_id = ? AND
-			(SELECT COUNT(*)
-			FROM
-			(SELECT ? AS text) AS texts
-			INNER JOIN
-			(SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
-			ON texts.text LIKE patterns.pattern) >= 1;
-			`
-			if _, err := tx.ExecContext(ctx, query, livecomment.ID, livestreamID, livecomment.Comment, ngword.Word); err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
+	// 削除対象のIDを収集
+	var deleteIDs []int64
+	for _, livecomment := range livecomments {
+		for _, ngword := range ngwords {
+			if strings.Contains(livecomment.Comment, ngword.Word) {
+				deleteIDs = append(deleteIDs, livecomment.ID)
+				break // このコメントは削除対象なので、他のNGワードはチェック不要
 			}
+		}
+	}
+
+	// 一括削除
+	if len(deleteIDs) > 0 {
+		query, args, err := sqlx.In("DELETE FROM livecomments WHERE id IN (?)", deleteIDs)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query for delete: "+err.Error())
+		}
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
 		}
 	}
 
