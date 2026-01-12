@@ -377,6 +377,7 @@ func moderateHandler(c echo.Context) error {
 	if err := tx.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
+	time.Sleep(time.Second * 5)
 
 	return c.JSON(http.StatusCreated, map[string]interface{}{
 		"word_id": wordID,
