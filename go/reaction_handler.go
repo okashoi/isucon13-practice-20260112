@@ -66,14 +66,9 @@ func getReactionsHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound, "failed to get reactions")
 	}
 
-	reactions := make([]Reaction, len(reactionModels))
-	for i := range reactionModels {
-		reaction, err := fillReactionResponse(ctx, tx, reactionModels[i])
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill reaction: "+err.Error())
-		}
-
-		reactions[i] = reaction
+	reactions, err := fillReactionsResponse(ctx, tx, reactionModels)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill reactions: "+err.Error())
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -142,31 +137,82 @@ func postReactionHandler(c echo.Context) error {
 }
 
 func fillReactionResponse(ctx context.Context, tx *sqlx.Tx, reactionModel ReactionModel) (Reaction, error) {
-	userModel := UserModel{}
-	if err := tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE id = ?", reactionModel.UserID); err != nil {
-		return Reaction{}, err
-	}
-	user, err := fillUserResponse(ctx, tx, userModel)
+	reactions, err := fillReactionsResponse(ctx, tx, []ReactionModel{reactionModel})
 	if err != nil {
 		return Reaction{}, err
 	}
+	return reactions[0], nil
+}
 
-	livestreamModel := LivestreamModel{}
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", reactionModel.LivestreamID); err != nil {
-		return Reaction{}, err
+func fillReactionsResponse(ctx context.Context, tx *sqlx.Tx, reactionModels []ReactionModel) ([]Reaction, error) {
+	if len(reactionModels) == 0 {
+		return []Reaction{}, nil
 	}
-	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
+
+	// user_id と livestream_id を収集
+	userIDSet := make(map[int64]struct{})
+	livestreamIDSet := make(map[int64]struct{})
+	for _, r := range reactionModels {
+		userIDSet[r.UserID] = struct{}{}
+		livestreamIDSet[r.LivestreamID] = struct{}{}
+	}
+
+	userIDs := make([]int64, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
+	}
+	livestreamIDs := make([]int64, 0, len(livestreamIDSet))
+	for id := range livestreamIDSet {
+		livestreamIDs = append(livestreamIDs, id)
+	}
+
+	// users を一括取得
+	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
 	if err != nil {
-		return Reaction{}, err
+		return nil, err
+	}
+	var userModels []UserModel
+	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
+		return nil, err
+	}
+	users, err := fillUsersResponse(ctx, tx, userModels)
+	if err != nil {
+		return nil, err
+	}
+	userMap := make(map[int64]User)
+	for i, u := range userModels {
+		userMap[u.ID] = users[i]
 	}
 
-	reaction := Reaction{
-		ID:         reactionModel.ID,
-		EmojiName:  reactionModel.EmojiName,
-		User:       user,
-		Livestream: livestream,
-		CreatedAt:  reactionModel.CreatedAt,
+	// livestreams を一括取得
+	query, args, err = sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+	if err != nil {
+		return nil, err
+	}
+	var livestreamModels []LivestreamModel
+	if err := tx.SelectContext(ctx, &livestreamModels, query, args...); err != nil {
+		return nil, err
+	}
+	livestreams, err := fillLivestreamsResponse(ctx, tx, livestreamModels)
+	if err != nil {
+		return nil, err
+	}
+	livestreamMap := make(map[int64]Livestream)
+	for i, ls := range livestreamModels {
+		livestreamMap[ls.ID] = livestreams[i]
 	}
 
-	return reaction, nil
+	// Reaction を構築
+	reactions := make([]Reaction, len(reactionModels))
+	for i, rModel := range reactionModels {
+		reactions[i] = Reaction{
+			ID:         rModel.ID,
+			EmojiName:  rModel.EmojiName,
+			User:       userMap[rModel.UserID],
+			Livestream: livestreamMap[rModel.LivestreamID],
+			CreatedAt:  rModel.CreatedAt,
+		}
+	}
+
+	return reactions, nil
 }

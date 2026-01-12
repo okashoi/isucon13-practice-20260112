@@ -399,34 +399,86 @@ func verifyUserSession(c echo.Context) error {
 }
 
 func fillUserResponse(ctx context.Context, tx *sqlx.Tx, userModel UserModel) (User, error) {
-	themeModel := ThemeModel{}
-	if err := tx.GetContext(ctx, &themeModel, "SELECT * FROM themes WHERE user_id = ?", userModel.ID); err != nil {
+	users, err := fillUsersResponse(ctx, tx, []UserModel{userModel})
+	if err != nil {
 		return User{}, err
 	}
+	return users[0], nil
+}
 
-	var image []byte
-	if err := tx.GetContext(ctx, &image, "SELECT image FROM icons WHERE user_id = ?", userModel.ID); err != nil {
-		if !errors.Is(err, sql.ErrNoRows) {
-			return User{}, err
-		}
-		image, err = os.ReadFile(fallbackImage)
-		if err != nil {
-			return User{}, err
-		}
-	}
-	iconHash := sha256.Sum256(image)
+// IconModel はアイコン画像取得用の構造体
+type IconModel struct {
+	UserID int64  `db:"user_id"`
+	Image  []byte `db:"image"`
+}
 
-	user := User{
-		ID:          userModel.ID,
-		Name:        userModel.Name,
-		DisplayName: userModel.DisplayName,
-		Description: userModel.Description,
-		Theme: Theme{
-			ID:       themeModel.ID,
-			DarkMode: themeModel.DarkMode,
-		},
-		IconHash: fmt.Sprintf("%x", iconHash),
+func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel) ([]User, error) {
+	if len(userModels) == 0 {
+		return []User{}, nil
 	}
 
-	return user, nil
+	// ユーザーIDを収集
+	userIDs := make([]int64, len(userModels))
+	for i, u := range userModels {
+		userIDs[i] = u.ID
+	}
+
+	// themes を一括取得
+	query, args, err := sqlx.In("SELECT * FROM themes WHERE user_id IN (?)", userIDs)
+	if err != nil {
+		return nil, err
+	}
+	var themeModels []ThemeModel
+	if err := tx.SelectContext(ctx, &themeModels, query, args...); err != nil {
+		return nil, err
+	}
+	themeMap := make(map[int64]ThemeModel)
+	for _, t := range themeModels {
+		themeMap[t.UserID] = t
+	}
+
+	// icons を一括取得
+	query, args, err = sqlx.In("SELECT user_id, image FROM icons WHERE user_id IN (?)", userIDs)
+	if err != nil {
+		return nil, err
+	}
+	var iconModels []IconModel
+	if err := tx.SelectContext(ctx, &iconModels, query, args...); err != nil {
+		return nil, err
+	}
+	iconMap := make(map[int64][]byte)
+	for _, icon := range iconModels {
+		iconMap[icon.UserID] = icon.Image
+	}
+
+	// fallback 画像を読み込み（アイコンがないユーザー用）
+	fallbackImageData, err := os.ReadFile(fallbackImage)
+	if err != nil {
+		return nil, err
+	}
+
+	// User を構築
+	users := make([]User, len(userModels))
+	for i, userModel := range userModels {
+		theme := themeMap[userModel.ID]
+		image, ok := iconMap[userModel.ID]
+		if !ok {
+			image = fallbackImageData
+		}
+		iconHash := sha256.Sum256(image)
+
+		users[i] = User{
+			ID:          userModel.ID,
+			Name:        userModel.Name,
+			DisplayName: userModel.DisplayName,
+			Description: userModel.Description,
+			Theme: Theme{
+				ID:       theme.ID,
+				DarkMode: theme.DarkMode,
+			},
+			IconHash: fmt.Sprintf("%x", iconHash),
+		}
+	}
+
+	return users, nil
 }
