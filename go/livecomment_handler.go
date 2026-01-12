@@ -102,14 +102,9 @@ func getLivecommentsHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	livecomments := make([]Livecomment, len(livecommentModels))
-	for i := range livecommentModels {
-		livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModels[i])
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to fil livecomments: "+err.Error())
-		}
-
-		livecomments[i] = livecomment
+	livecomments, err := fillLivecommentsResponse(ctx, tx, livecommentModels)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livecomments: "+err.Error())
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -423,60 +418,163 @@ func moderateHandler(c echo.Context) error {
 }
 
 func fillLivecommentResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel LivecommentModel) (Livecomment, error) {
-	commentOwnerModel := UserModel{}
-	if err := tx.GetContext(ctx, &commentOwnerModel, "SELECT * FROM users WHERE id = ?", livecommentModel.UserID); err != nil {
-		return Livecomment{}, err
-	}
-	commentOwner, err := fillUserResponse(ctx, tx, commentOwnerModel)
+	livecomments, err := fillLivecommentsResponse(ctx, tx, []LivecommentModel{livecommentModel})
 	if err != nil {
 		return Livecomment{}, err
 	}
+	return livecomments[0], nil
+}
 
-	livestreamModel := LivestreamModel{}
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livecommentModel.LivestreamID); err != nil {
-		return Livecomment{}, err
+func fillLivecommentsResponse(ctx context.Context, tx *sqlx.Tx, livecommentModels []LivecommentModel) ([]Livecomment, error) {
+	if len(livecommentModels) == 0 {
+		return []Livecomment{}, nil
 	}
-	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
+
+	// user_id と livestream_id を収集
+	userIDSet := make(map[int64]struct{})
+	livestreamIDSet := make(map[int64]struct{})
+	for _, lc := range livecommentModels {
+		userIDSet[lc.UserID] = struct{}{}
+		livestreamIDSet[lc.LivestreamID] = struct{}{}
+	}
+
+	userIDs := make([]int64, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
+	}
+	livestreamIDs := make([]int64, 0, len(livestreamIDSet))
+	for id := range livestreamIDSet {
+		livestreamIDs = append(livestreamIDs, id)
+	}
+
+	// users を一括取得
+	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
 	if err != nil {
-		return Livecomment{}, err
+		return nil, err
+	}
+	var userModels []UserModel
+	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
+		return nil, err
+	}
+	users, err := fillUsersResponse(ctx, tx, userModels)
+	if err != nil {
+		return nil, err
+	}
+	userMap := make(map[int64]User)
+	for i, u := range userModels {
+		userMap[u.ID] = users[i]
 	}
 
-	livecomment := Livecomment{
-		ID:         livecommentModel.ID,
-		User:       commentOwner,
-		Livestream: livestream,
-		Comment:    livecommentModel.Comment,
-		Tip:        livecommentModel.Tip,
-		CreatedAt:  livecommentModel.CreatedAt,
+	// livestreams を一括取得
+	query, args, err = sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+	if err != nil {
+		return nil, err
+	}
+	var livestreamModels []LivestreamModel
+	if err := tx.SelectContext(ctx, &livestreamModels, query, args...); err != nil {
+		return nil, err
+	}
+	livestreams, err := fillLivestreamsResponse(ctx, tx, livestreamModels)
+	if err != nil {
+		return nil, err
+	}
+	livestreamMap := make(map[int64]Livestream)
+	for i, ls := range livestreamModels {
+		livestreamMap[ls.ID] = livestreams[i]
 	}
 
-	return livecomment, nil
+	// Livecomment を構築
+	livecomments := make([]Livecomment, len(livecommentModels))
+	for i, lcModel := range livecommentModels {
+		livecomments[i] = Livecomment{
+			ID:         lcModel.ID,
+			User:       userMap[lcModel.UserID],
+			Livestream: livestreamMap[lcModel.LivestreamID],
+			Comment:    lcModel.Comment,
+			Tip:        lcModel.Tip,
+			CreatedAt:  lcModel.CreatedAt,
+		}
+	}
+
+	return livecomments, nil
 }
 
 func fillLivecommentReportResponse(ctx context.Context, tx *sqlx.Tx, reportModel LivecommentReportModel) (LivecommentReport, error) {
-	reporterModel := UserModel{}
-	if err := tx.GetContext(ctx, &reporterModel, "SELECT * FROM users WHERE id = ?", reportModel.UserID); err != nil {
-		return LivecommentReport{}, err
-	}
-	reporter, err := fillUserResponse(ctx, tx, reporterModel)
+	reports, err := fillLivecommentReportsResponse(ctx, tx, []LivecommentReportModel{reportModel})
 	if err != nil {
 		return LivecommentReport{}, err
 	}
+	return reports[0], nil
+}
 
-	livecommentModel := LivecommentModel{}
-	if err := tx.GetContext(ctx, &livecommentModel, "SELECT * FROM livecomments WHERE id = ?", reportModel.LivecommentID); err != nil {
-		return LivecommentReport{}, err
+func fillLivecommentReportsResponse(ctx context.Context, tx *sqlx.Tx, reportModels []LivecommentReportModel) ([]LivecommentReport, error) {
+	if len(reportModels) == 0 {
+		return []LivecommentReport{}, nil
 	}
-	livecomment, err := fillLivecommentResponse(ctx, tx, livecommentModel)
+
+	// reporter の user_id と livecomment_id を収集
+	userIDSet := make(map[int64]struct{})
+	livecommentIDSet := make(map[int64]struct{})
+	for _, r := range reportModels {
+		userIDSet[r.UserID] = struct{}{}
+		livecommentIDSet[r.LivecommentID] = struct{}{}
+	}
+
+	userIDs := make([]int64, 0, len(userIDSet))
+	for id := range userIDSet {
+		userIDs = append(userIDs, id)
+	}
+	livecommentIDs := make([]int64, 0, len(livecommentIDSet))
+	for id := range livecommentIDSet {
+		livecommentIDs = append(livecommentIDs, id)
+	}
+
+	// reporter users を一括取得
+	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
 	if err != nil {
-		return LivecommentReport{}, err
+		return nil, err
+	}
+	var userModels []UserModel
+	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
+		return nil, err
+	}
+	users, err := fillUsersResponse(ctx, tx, userModels)
+	if err != nil {
+		return nil, err
+	}
+	userMap := make(map[int64]User)
+	for i, u := range userModels {
+		userMap[u.ID] = users[i]
 	}
 
-	report := LivecommentReport{
-		ID:          reportModel.ID,
-		Reporter:    reporter,
-		Livecomment: livecomment,
-		CreatedAt:   reportModel.CreatedAt,
+	// livecomments を一括取得
+	query, args, err = sqlx.In("SELECT * FROM livecomments WHERE id IN (?)", livecommentIDs)
+	if err != nil {
+		return nil, err
 	}
-	return report, nil
+	var livecommentModels []LivecommentModel
+	if err := tx.SelectContext(ctx, &livecommentModels, query, args...); err != nil {
+		return nil, err
+	}
+	livecomments, err := fillLivecommentsResponse(ctx, tx, livecommentModels)
+	if err != nil {
+		return nil, err
+	}
+	livecommentMap := make(map[int64]Livecomment)
+	for i, lc := range livecommentModels {
+		livecommentMap[lc.ID] = livecomments[i]
+	}
+
+	// LivecommentReport を構築
+	reports := make([]LivecommentReport, len(reportModels))
+	for i, rModel := range reportModels {
+		reports[i] = LivecommentReport{
+			ID:          rModel.ID,
+			Reporter:    userMap[rModel.UserID],
+			Livecomment: livecommentMap[rModel.LivecommentID],
+			CreatedAt:   rModel.CreatedAt,
+		}
+	}
+
+	return reports, nil
 }
