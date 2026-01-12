@@ -10,9 +10,7 @@ stop-services:
 	# ssh isucon-s2 "sudo systemctl stop mysql"
 
 build:
-	__FIXME__
-	# cd go && make
-	# cd go && go build -o isuhoge
+	cd go && make
 
 logs: limit=10000
 logs: opts=
