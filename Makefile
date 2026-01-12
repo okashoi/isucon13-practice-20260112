@@ -1,4 +1,4 @@
-APPNAME := isuhoge-go.service
+APPNAME := isupipe-go.service
 
 .PHONY: *
 gogo: stop-services build logs/clear start-services
@@ -17,7 +17,7 @@ build:
 logs: limit=10000
 logs: opts=
 logs:
-	journalctl -ex --since "$(shell systemctl status isuride-go.service | grep "Active:" | awk '{print $$6, $$7}')" -n $(limit) -q $(opts)
+	journalctl -ex --since "$(shell systemctl status isupipe-go.service | grep "Active:" | awk '{print $$6, $$7}')" -n $(limit) -q $(opts)
 
 logs/error:
 	$(MAKE) logs opts='--grep "(error|panic|- 500)" --no-pager'
@@ -37,4 +37,3 @@ start-services:
 	sudo systemctl start mysql
 	sudo systemctl start $(APPNAME)
 	sudo systemctl start nginx
-
