@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -382,17 +383,21 @@ func moderateHandler(c echo.Context) error {
 	}
 
 	// 今回追加されたNGワードにヒットする過去の投稿を削除する
-	// (1) 削除対象を見つける
-	var targetIDs []int64
-	query := `
-		SELECT id FROM livecomments
-		WHERE livestream_id = ? AND comment LIKE CONCAT('%', ?, '%')
-	`
-	if err := tx.SelectContext(ctx, &targetIDs, query, livestreamID, req.NGWord); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to find target livecomments: "+err.Error())
+	// (1) コメント全件取得
+	var livecomments []*LivecommentModel
+	if err := tx.SelectContext(ctx, &livecomments, "SELECT * FROM livecomments WHERE livestream_id = ?", livestreamID); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	// (2) 削除する（対象がある場合のみ）
+	// (2) NGワード含むものを抽出
+	var targetIDs []int64
+	for _, livecomment := range livecomments {
+		if strings.Contains(livecomment.Comment, req.NGWord) {
+			targetIDs = append(targetIDs, livecomment.ID)
+		}
+	}
+
+	// (3) DELETE
 	if len(targetIDs) > 0 {
 		query, args, err := sqlx.In("DELETE FROM livecomments WHERE id IN (?)", targetIDs)
 		if err != nil {
