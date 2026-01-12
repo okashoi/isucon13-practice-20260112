@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -383,27 +382,25 @@ func moderateHandler(c echo.Context) error {
 	}
 
 	// 今回追加されたNGワードにヒットする過去の投稿を削除する
-	// (1) コメント全件取得
 	var livecomments []*LivecommentModel
 	if err := tx.SelectContext(ctx, &livecomments, "SELECT * FROM livecomments WHERE livestream_id = ?", livestreamID); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
 	}
 
-	// (2) NGワード含むものを抽出
-	var targetIDs []int64
 	for _, livecomment := range livecomments {
-		if strings.Contains(livecomment.Comment, req.NGWord) {
-			targetIDs = append(targetIDs, livecomment.ID)
-		}
-	}
-
-	// (3) DELETE
-	if len(targetIDs) > 0 {
-		query, args, err := sqlx.In("DELETE FROM livecomments WHERE id IN (?)", targetIDs)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to build delete query: "+err.Error())
-		}
-		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+		query := `
+		DELETE FROM livecomments
+		WHERE
+		id = ? AND
+		livestream_id = ? AND
+		(SELECT COUNT(*)
+		FROM
+		(SELECT ? AS text) AS texts
+		INNER JOIN
+		(SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
+		ON texts.text LIKE patterns.pattern) >= 1;
+		`
+		if _, err := tx.ExecContext(ctx, query, livecomment.ID, livestreamID, livecomment.Comment, req.NGWord); err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
 		}
 	}
