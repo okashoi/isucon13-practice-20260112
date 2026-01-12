@@ -6,6 +6,8 @@ ISUCON3_DEST := /home/isucon/webapp/go/isupipe
 gogo: stop-services build logs/clear start-services
 
 stop-services:
+	sudo systemctl stop dnsdist
+	sudo systemctl stop pdns
 	sudo systemctl stop nginx
 	ssh $(ISUCON3_HOST) "sudo systemctl stop $(APPNAME)"
 	ssh isucon-s2 "sudo systemctl stop mysql"
@@ -36,3 +38,5 @@ start-services:
 	ssh isucon-s2 "sudo systemctl start mysql"
 	ssh $(ISUCON3_HOST) "sudo systemctl start $(APPNAME)"
 	sudo systemctl start nginx
+	sudo systemctl start pdns
+	sudo systemctl start dnsdist
