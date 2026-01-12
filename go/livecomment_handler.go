@@ -382,12 +382,25 @@ func moderateHandler(c echo.Context) error {
 	}
 
 	// 今回追加されたNGワードにヒットする過去の投稿を削除する
+	// (1) 削除対象を見つける
+	var targetIDs []int64
 	query := `
-		DELETE FROM livecomments
+		SELECT id FROM livecomments
 		WHERE livestream_id = ? AND comment LIKE CONCAT('%', ?, '%')
 	`
-	if _, err := tx.ExecContext(ctx, query, livestreamID, req.NGWord); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
+	if err := tx.SelectContext(ctx, &targetIDs, query, livestreamID, req.NGWord); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to find target livecomments: "+err.Error())
+	}
+
+	// (2) 削除する（対象がある場合のみ）
+	if len(targetIDs) > 0 {
+		query, args, err := sqlx.In("DELETE FROM livecomments WHERE id IN (?)", targetIDs)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to build delete query: "+err.Error())
+		}
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
