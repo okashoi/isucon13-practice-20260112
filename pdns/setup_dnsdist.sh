@@ -7,6 +7,7 @@
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 DNSDIST_CONF="${SCRIPT_DIR}/dnsdist.conf"
 PDNS_CONF="${SCRIPT_DIR}/pdns.conf"
+NAMED_CONF="${SCRIPT_DIR}/named.conf"
 
 usage() {
   echo "Usage: $0 {install|configure|start|stop|status|uninstall}"
@@ -46,25 +47,34 @@ install_dnsdist() {
 configure_dnsdist() {
   echo "=== dnsdist 設定を配置中 ==="
   
-  # 設定ファイルをバックアップ
+  # dnsdist設定ファイルをバックアップ・コピー
   if [ -f /etc/dnsdist/dnsdist.conf ]; then
     sudo cp /etc/dnsdist/dnsdist.conf "/etc/dnsdist/dnsdist.conf.$(date +%Y%m%d%H%M%S).bak"
   fi
-  
-  # 設定ファイルをコピー
   sudo cp "${DNSDIST_CONF}" /etc/dnsdist/dnsdist.conf
   
-  # PowerDNSの設定も更新（ポート5300に変更）
+  # PowerDNSの設定をバックアップ
   if [ -f /etc/powerdns/pdns.conf ]; then
     sudo cp /etc/powerdns/pdns.conf "/etc/powerdns/pdns.conf.$(date +%Y%m%d%H%M%S).bak"
   fi
+  
+  # 古いpdns.d設定ファイルを削除（gmysql設定などを除去）
+  echo "古いpdns.d設定ファイルを削除中..."
+  sudo rm -f /etc/powerdns/pdns.d/*.conf
+  
+  # PowerDNS設定ファイルをコピー（BINDバックエンド）
   sudo cp "${PDNS_CONF}" /etc/powerdns/pdns.conf
+  sudo cp "${NAMED_CONF}" /etc/powerdns/named.conf
+  
+  # ゾーンファイルを初期化
+  echo "ゾーンファイルを初期化中..."
+  "${SCRIPT_DIR}/init_zone.sh"
   
   echo "=== 設定完了 ==="
   echo ""
   echo "構成:"
   echo "  dnsdist   -> 0.0.0.0:53  (フロントエンド)"
-  echo "  PowerDNS  -> 127.0.0.1:5300 (バックエンド)"
+  echo "  PowerDNS  -> 127.0.0.1:5300 (バックエンド, BINDゾーンファイル)"
 }
 
 start_dnsdist() {
