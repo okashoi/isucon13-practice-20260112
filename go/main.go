@@ -113,6 +113,12 @@ func initializeHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 
+	// アイコンキャッシュをクリア
+	if err := clearIconCache(); err != nil {
+		c.Logger().Warnf("failed to clear icon cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
+	}
+
 	// 追加
 	go func() {
 		if _, err := http.Get("http://18.181.252.154:9000/api/group/collect"); err != nil {
@@ -208,6 +214,12 @@ func main() {
 		os.Exit(1)
 	}
 	powerDNSSubdomainAddress = subdomainAddr
+
+	// アイコンキャッシュを初期化
+	if err := initIconCache(); err != nil {
+		e.Logger.Errorf("failed to initialize icon cache: %v", err)
+		os.Exit(1)
+	}
 
 	// HTTPサーバ起動
 	listenAddr := net.JoinHostPort("", strconv.Itoa(listenPort))
