@@ -1,16 +1,19 @@
 APPNAME := isupipe-go.service
+ISUCON3_HOST := isucon-3
+ISUCON3_DEST := /home/isucon/webapp/go/isupipe
 
 .PHONY: *
 gogo: stop-services build logs/clear start-services
 
 stop-services:
 	sudo systemctl stop nginx
-	sudo systemctl stop $(APPNAME)
+	ssh $(ISUCON3_HOST) "sudo systemctl stop $(APPNAME)"
 	ssh isucon-s2 "sudo systemctl stop mysql"
 	# ssh isucon-s2 "sudo systemctl stop mysql"
 
 build:
 	cd go && make
+	scp go/isupipe $(ISUCON3_HOST):$(ISUCON3_DEST)
 
 logs: limit=10000
 logs: opts=
@@ -31,5 +34,5 @@ start-services:
 	sudo systemctl daemon-reload
 	# ssh isucon-s2 "sudo systemctl start mysql"
 	ssh isucon-s2 "sudo systemctl start mysql"
-	sudo systemctl start $(APPNAME)
+	ssh $(ISUCON3_HOST) "sudo systemctl start $(APPNAME)"
 	sudo systemctl start nginx
