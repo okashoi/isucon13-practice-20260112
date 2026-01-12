@@ -173,10 +173,36 @@ func getIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
 	}
 
+	// If-None-Match ヘッダをチェック
+	ifNoneMatch := c.Request().Header.Get("If-None-Match")
+
+	// メモリキャッシュからハッシュを取得
+	iconHash, hashCached := getIconHash(user.ID)
+
 	// ファイルシステムからアイコンを読み込む
 	iconPath := getIconPath(user.ID)
 	if _, err := os.Stat(iconPath); err == nil {
 		// ファイルが存在する場合
+		// ハッシュがキャッシュされていない場合は計算
+		if !hashCached {
+			imageData, err := os.ReadFile(iconPath)
+			if err == nil {
+				hash := sha256.Sum256(imageData)
+				iconHash = fmt.Sprintf("%x", hash)
+				setIconHash(user.ID, iconHash)
+				hashCached = true
+			}
+		}
+
+		// If-None-Match が一致すれば 304 を返す
+		if hashCached && ifNoneMatch == fmt.Sprintf(`"%s"`, iconHash) {
+			return c.NoContent(http.StatusNotModified)
+		}
+
+		// ETag ヘッダを付与してファイルを返す
+		if hashCached {
+			c.Response().Header().Set("ETag", fmt.Sprintf(`"%s"`, iconHash))
+		}
 		return c.File(iconPath)
 	}
 
@@ -184,6 +210,11 @@ func getIconHandler(c echo.Context) error {
 	var image []byte
 	if err := tx.GetContext(ctx, &image, "SELECT image FROM icons WHERE user_id = ?", user.ID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			// fallback 画像の場合も If-None-Match をチェック
+			if ifNoneMatch == fmt.Sprintf(`"%s"`, fallbackImageHash) {
+				return c.NoContent(http.StatusNotModified)
+			}
+			c.Response().Header().Set("ETag", fmt.Sprintf(`"%s"`, fallbackImageHash))
 			return c.File(fallbackImage)
 		} else {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user icon: "+err.Error())
@@ -198,8 +229,16 @@ func getIconHandler(c echo.Context) error {
 
 	// ハッシュも計算してキャッシュ
 	hash := sha256.Sum256(image)
-	setIconHash(user.ID, fmt.Sprintf("%x", hash))
+	iconHash = fmt.Sprintf("%x", hash)
+	setIconHash(user.ID, iconHash)
 
+	// If-None-Match が一致すれば 304 を返す
+	if ifNoneMatch == fmt.Sprintf(`"%s"`, iconHash) {
+		return c.NoContent(http.StatusNotModified)
+	}
+
+	// ETag ヘッダを付与
+	c.Response().Header().Set("ETag", fmt.Sprintf(`"%s"`, iconHash))
 	return c.Blob(http.StatusOK, "image/jpeg", image)
 }
 
