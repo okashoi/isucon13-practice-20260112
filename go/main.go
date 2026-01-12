@@ -5,19 +5,20 @@ package main
 
 import (
 	"fmt"
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/sessions"
+	"github.com/jmoiron/sqlx"
+	echov4 "github.com/kaz/pprotein/integration/echov4"
+	"github.com/labstack/echo-contrib/session"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	echolog "github.com/labstack/gommon/log"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
-	"github.com/labstack/echo/v4"
-	"github.com/go-sql-driver/mysql"
-	"github.com/gorilla/sessions"
-	"github.com/jmoiron/sqlx"
-	"github.com/labstack/echo-contrib/session"
-	"github.com/labstack/echo/v4/middleware"
-	echolog "github.com/labstack/gommon/log"
 )
 
 const (
@@ -134,7 +135,7 @@ func main() {
 	e.Use(session.Middleware(cookieStore))
 	// e.Use(middleware.Recover())
 
-    echov4.EnableDebugHandler(e)
+	echov4.EnableDebugHandler(e)
 	// 初期化
 	e.POST("/api/initialize", initializeHandler)
 
