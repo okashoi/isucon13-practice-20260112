@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -65,6 +66,55 @@ type ReservationSlotModel struct {
 	Slot    int64 `db:"slot" json:"slot"`
 	StartAt int64 `db:"start_at" json:"start_at"`
 	EndAt   int64 `db:"end_at" json:"end_at"`
+}
+
+// livestream_tags のオンメモリキャッシュ（key: livestream_id）
+var (
+	livestreamTagCache   = make(map[int64][]LivestreamTagModel)
+	livestreamTagCacheMu sync.RWMutex
+)
+
+func getLivestreamTagsByLivestreamIDs(livestreamIDs []int64) map[int64][]LivestreamTagModel {
+	if len(livestreamIDs) == 0 {
+		return nil
+	}
+	livestreamTagCacheMu.RLock()
+	defer livestreamTagCacheMu.RUnlock()
+	result := make(map[int64][]LivestreamTagModel, len(livestreamIDs))
+	for _, id := range livestreamIDs {
+		if tags, ok := livestreamTagCache[id]; ok {
+			result[id] = tags
+		}
+	}
+	return result
+}
+
+func setLivestreamTagsCache(livestreamID int64, tags []LivestreamTagModel) {
+	if len(tags) == 0 {
+		return
+	}
+	livestreamTagCacheMu.Lock()
+	livestreamTagCache[livestreamID] = tags
+	livestreamTagCacheMu.Unlock()
+}
+
+func clearLivestreamTagsCache() {
+	livestreamTagCacheMu.Lock()
+	livestreamTagCache = make(map[int64][]LivestreamTagModel)
+	livestreamTagCacheMu.Unlock()
+}
+
+func warmUpLivestreamTagsCache(ctx context.Context, db *sqlx.DB) error {
+	var all []LivestreamTagModel
+	if err := db.SelectContext(ctx, &all, "SELECT * FROM livestream_tags"); err != nil {
+		return err
+	}
+	livestreamTagCacheMu.Lock()
+	for _, lt := range all {
+		livestreamTagCache[lt.LivestreamID] = append(livestreamTagCache[lt.LivestreamID], lt)
+	}
+	livestreamTagCacheMu.Unlock()
+	return nil
 }
 
 func reserveLivestreamHandler(c echo.Context) error {
@@ -152,6 +202,7 @@ func reserveLivestreamHandler(c echo.Context) error {
 	livestreamModel.ID = livestreamID
 
 	// タグ追加
+	tagModelsForCache := make([]LivestreamTagModel, 0, len(req.Tags))
 	for _, tagID := range req.Tags {
 		if _, err := tx.NamedExecContext(ctx, "INSERT INTO livestream_tags (livestream_id, tag_id) VALUES (:livestream_id, :tag_id)", &LivestreamTagModel{
 			LivestreamID: livestreamID,
@@ -159,7 +210,9 @@ func reserveLivestreamHandler(c echo.Context) error {
 		}); err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to insert livestream tag: "+err.Error())
 		}
+		tagModelsForCache = append(tagModelsForCache, LivestreamTagModel{LivestreamID: livestreamID, TagID: tagID})
 	}
+	setLivestreamTagsCache(livestreamID, tagModelsForCache)
 
 	livestream, err := fillLivestreamResponse(ctx, tx, *livestreamModel)
 	if err != nil {
@@ -200,13 +253,35 @@ func searchLivestreamsHandler(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get keyTaggedLivestreams: "+err.Error())
 		}
 
-		for _, keyTaggedLivestream := range keyTaggedLivestreams {
-			ls := LivestreamModel{}
-			if err := tx.GetContext(ctx, &ls, "SELECT * FROM livestreams WHERE id = ?", keyTaggedLivestream.LivestreamID); err != nil {
+		// 重複を除きつつ livestream_id DESC の順序を保持
+		seen := make(map[int64]struct{})
+		livestreamIDs := make([]int64, 0, len(keyTaggedLivestreams))
+		for _, lt := range keyTaggedLivestreams {
+			if _, ok := seen[lt.LivestreamID]; ok {
+				continue
+			}
+			seen[lt.LivestreamID] = struct{}{}
+			livestreamIDs = append(livestreamIDs, lt.LivestreamID)
+		}
+		if len(livestreamIDs) > 0 {
+			q, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
+			}
+			var fetched []LivestreamModel
+			if err := tx.SelectContext(ctx, &fetched, q, args...); err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
 			}
-
-			livestreamModels = append(livestreamModels, &ls)
+			byID := make(map[int64]*LivestreamModel, len(fetched))
+			for i := range fetched {
+				byID[fetched[i].ID] = &fetched[i]
+			}
+			livestreamModels = make([]*LivestreamModel, 0, len(livestreamIDs))
+			for _, id := range livestreamIDs {
+				if m, ok := byID[id]; ok {
+					livestreamModels = append(livestreamModels, m)
+				}
+			}
 		}
 	} else {
 		// 検索条件なし
@@ -530,14 +605,11 @@ func fillLivestreamsResponse(ctx context.Context, tx *sqlx.Tx, livestreamModels 
 		userMap[u.ID] = users[i]
 	}
 
-	// livestream_tags を一括取得
-	query, args, err := sqlx.In("SELECT * FROM livestream_tags WHERE livestream_id IN (?)", livestreamIDs)
-	if err != nil {
-		return nil, err
-	}
+	// livestream_tags をオンメモリキャッシュから一括取得
+	tagsByLivestreamID := getLivestreamTagsByLivestreamIDs(livestreamIDs)
 	var allTagModels []LivestreamTagModel
-	if err := tx.SelectContext(ctx, &allTagModels, query, args...); err != nil {
-		return nil, err
+	for _, tags := range tagsByLivestreamID {
+		allTagModels = append(allTagModels, tags...)
 	}
 
 	// tag_id を収集
@@ -553,12 +625,12 @@ func fillLivestreamsResponse(ctx context.Context, tx *sqlx.Tx, livestreamModels 
 	// tags を一括取得
 	tagMap := make(map[int64]TagModel)
 	if len(tagIDs) > 0 {
-		query, args, err = sqlx.In("SELECT * FROM tags WHERE id IN (?)", tagIDs)
+		tagQuery, tagArgs, err := sqlx.In("SELECT * FROM tags WHERE id IN (?)", tagIDs)
 		if err != nil {
 			return nil, err
 		}
 		var tagModels []TagModel
-		if err := tx.SelectContext(ctx, &tagModels, query, args...); err != nil {
+		if err := tx.SelectContext(ctx, &tagModels, tagQuery, tagArgs...); err != nil {
 			return nil, err
 		}
 		for _, t := range tagModels {
