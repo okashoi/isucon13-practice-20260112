@@ -40,6 +40,12 @@ var (
 	iconHashCacheMu sync.RWMutex
 )
 
+// テーマのメモリキャッシュ（user_id -> ThemeModel）
+var (
+	themeCache   = make(map[int64]ThemeModel)
+	themeCacheMu sync.RWMutex
+)
+
 // fallback 画像のハッシュ（起動時に計算）
 var fallbackImageHash string
 
@@ -97,6 +103,25 @@ func setIconHash(userID int64, hash string) {
 	iconHashCacheMu.Lock()
 	iconHashCache[userID] = hash
 	iconHashCacheMu.Unlock()
+}
+
+func getThemeFromCache(userID int64) (ThemeModel, bool) {
+	themeCacheMu.RLock()
+	t, ok := themeCache[userID]
+	themeCacheMu.RUnlock()
+	return t, ok
+}
+
+func setThemeCache(t ThemeModel) {
+	themeCacheMu.Lock()
+	themeCache[t.UserID] = t
+	themeCacheMu.Unlock()
+}
+
+func clearThemeCache() {
+	themeCacheMu.Lock()
+	themeCache = make(map[int64]ThemeModel)
+	themeCacheMu.Unlock()
 }
 
 type UserModel struct {
@@ -559,18 +584,30 @@ func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel)
 		userIDs[i] = u.ID
 	}
 
-	// themes を一括取得
-	query, args, err := sqlx.In("SELECT * FROM themes WHERE user_id IN (?)", userIDs)
-	if err != nil {
-		return nil, err
-	}
-	var themeModels []ThemeModel
-	if err := tx.SelectContext(ctx, &themeModels, query, args...); err != nil {
-		return nil, err
-	}
+	// テーマをキャッシュから取得し、キャッシュにない user_id を収集
 	themeMap := make(map[int64]ThemeModel)
-	for _, t := range themeModels {
-		themeMap[t.UserID] = t
+	var uncachedThemeUserIDs []int64
+	for _, userID := range userIDs {
+		if t, ok := getThemeFromCache(userID); ok {
+			themeMap[userID] = t
+		} else {
+			uncachedThemeUserIDs = append(uncachedThemeUserIDs, userID)
+		}
+	}
+	// キャッシュにないテーマのみDBから一括取得
+	if len(uncachedThemeUserIDs) > 0 {
+		query, args, err := sqlx.In("SELECT * FROM themes WHERE user_id IN (?)", uncachedThemeUserIDs)
+		if err != nil {
+			return nil, err
+		}
+		var themeModels []ThemeModel
+		if err := tx.SelectContext(ctx, &themeModels, query, args...); err != nil {
+			return nil, err
+		}
+		for _, t := range themeModels {
+			themeMap[t.UserID] = t
+			setThemeCache(t)
+		}
 	}
 
 	// メモリキャッシュにないユーザーIDを収集
@@ -586,12 +623,12 @@ func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel)
 
 	// キャッシュにないユーザーのアイコンのみDBから取得
 	if len(uncachedUserIDs) > 0 {
-		query, args, err = sqlx.In("SELECT user_id, image FROM icons WHERE user_id IN (?)", uncachedUserIDs)
-		if err != nil {
-			return nil, err
+		iconQuery, iconArgs, iconErr := sqlx.In("SELECT user_id, image FROM icons WHERE user_id IN (?)", uncachedUserIDs)
+		if iconErr != nil {
+			return nil, iconErr
 		}
 		var iconModels []IconModel
-		if err := tx.SelectContext(ctx, &iconModels, query, args...); err != nil {
+		if err := tx.SelectContext(ctx, &iconModels, iconQuery, iconArgs...); err != nil {
 			return nil, err
 		}
 

@@ -118,6 +118,8 @@ func initializeHandler(c echo.Context) error {
 		c.Logger().Warnf("failed to clear icon cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
+	// テーマキャッシュをクリア
+	clearThemeCache()
 
 	// 追加
 	go func() {
