@@ -166,13 +166,9 @@ func fillReactionsResponse(ctx context.Context, tx *sqlx.Tx, reactionModels []Re
 		livestreamIDs = append(livestreamIDs, id)
 	}
 
-	// users を一括取得
-	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
+	// users を一括取得（オンメモリキャッシュ利用）
+	userModels, err := getUsersByIDsCached(ctx, tx, userIDs)
 	if err != nil {
-		return nil, err
-	}
-	var userModels []UserModel
-	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
 		return nil, err
 	}
 	users, err := fillUsersResponse(ctx, tx, userModels)
@@ -185,7 +181,7 @@ func fillReactionsResponse(ctx context.Context, tx *sqlx.Tx, reactionModels []Re
 	}
 
 	// livestreams を一括取得
-	query, args, err = sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+	query, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
 	if err != nil {
 		return nil, err
 	}

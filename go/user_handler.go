@@ -40,6 +40,13 @@ var (
 	iconHashCacheMu sync.RWMutex
 )
 
+// UserModel のオンメモリキャッシュ（id / name の両方で参照）
+var (
+	userCacheByID   = make(map[int64]*UserModel)
+	userCacheByName = make(map[string]*UserModel)
+	userCacheMu     sync.RWMutex
+)
+
 // fallback 画像のハッシュ（起動時に計算）
 var fallbackImageHash string
 
@@ -97,6 +104,38 @@ func setIconHash(userID int64, hash string) {
 	iconHashCacheMu.Lock()
 	iconHashCache[userID] = hash
 	iconHashCacheMu.Unlock()
+}
+
+func getCachedUserByID(id int64) (*UserModel, bool) {
+	userCacheMu.RLock()
+	u, ok := userCacheByID[id]
+	userCacheMu.RUnlock()
+	return u, ok
+}
+
+func getCachedUserByName(name string) (*UserModel, bool) {
+	userCacheMu.RLock()
+	u, ok := userCacheByName[name]
+	userCacheMu.RUnlock()
+	return u, ok
+}
+
+func setCachedUser(u *UserModel) {
+	if u == nil {
+		return
+	}
+	dup := &UserModel{ID: u.ID, Name: u.Name, DisplayName: u.DisplayName, Description: u.Description, HashedPassword: u.HashedPassword}
+	userCacheMu.Lock()
+	userCacheByID[dup.ID] = dup
+	userCacheByName[dup.Name] = dup
+	userCacheMu.Unlock()
+}
+
+func clearUserCache() {
+	userCacheMu.Lock()
+	userCacheByID = make(map[int64]*UserModel)
+	userCacheByName = make(map[string]*UserModel)
+	userCacheMu.Unlock()
 }
 
 type UserModel struct {
@@ -159,19 +198,29 @@ func getIconHandler(c echo.Context) error {
 
 	username := c.Param("username")
 
+	var user UserModel
+	if cached, ok := getCachedUserByName(username); ok {
+		user = *cached
+	} else {
+		tx, err := dbConn.BeginTxx(ctx, nil)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
+		}
+		defer tx.Rollback()
+		if err := tx.GetContext(ctx, &user, "SELECT * FROM users WHERE name = ?", username); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusNotFound, "not found user that has the given username")
+			}
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
+		}
+		setCachedUser(&user)
+	}
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	var user UserModel
-	if err := tx.GetContext(ctx, &user, "SELECT * FROM users WHERE name = ?", username); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "not found user that has the given username")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
-	}
 
 	// If-None-Match ヘッダをチェック
 	ifNoneMatch := c.Request().Header.Get("If-None-Match")
@@ -312,20 +361,30 @@ func getMeHandler(c echo.Context) error {
 	// existence already checked
 	userID := sess.Values[defaultUserIDKey].(int64)
 
+	var userModel UserModel
+	if cached, ok := getCachedUserByID(userID); ok {
+		userModel = *cached
+	} else {
+		tx, err := dbConn.BeginTxx(ctx, nil)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
+		}
+		defer tx.Rollback()
+		err = tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE id = ?", userID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return echo.NewHTTPError(http.StatusNotFound, "not found user that has the userid in session")
+		}
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
+		}
+		setCachedUser(&userModel)
+	}
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	userModel := UserModel{}
-	err = tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE id = ?", userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return echo.NewHTTPError(http.StatusNotFound, "not found user that has the userid in session")
-	}
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
-	}
 
 	user, err := fillUserResponse(ctx, tx, userModel)
 	if err != nil {
@@ -383,6 +442,7 @@ func registerHandler(c echo.Context) error {
 	}
 
 	userModel.ID = userID
+	setCachedUser(&userModel)
 
 	themeModel := ThemeModel{
 		UserID:   userID,
@@ -419,31 +479,31 @@ func loginHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
-	tx, err := dbConn.BeginTxx(ctx, nil)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
+	var userModel UserModel
+	if cached, ok := getCachedUserByName(req.Username); ok {
+		userModel = *cached
+	} else {
+		tx, err := dbConn.BeginTxx(ctx, nil)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
+		}
+		defer tx.Rollback()
+		err = tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE name = ?", req.Username)
+		if errors.Is(err, sql.ErrNoRows) {
+			return echo.NewHTTPError(http.StatusUnauthorized, "invalid username or password")
+		}
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
+		}
+		setCachedUser(&userModel)
+		if err := tx.Commit(); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
+		}
 	}
-	defer tx.Rollback()
 
-	userModel := UserModel{}
-	// usernameはUNIQUEなので、whereで一意に特定できる
-	err = tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE name = ?", req.Username)
-	if errors.Is(err, sql.ErrNoRows) {
+	if err := bcrypt.CompareHashAndPassword([]byte(userModel.HashedPassword), []byte(req.Password)); err == bcrypt.ErrMismatchedHashAndPassword {
 		return echo.NewHTTPError(http.StatusUnauthorized, "invalid username or password")
-	}
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
-	}
-
-	if err := tx.Commit(); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
-	}
-
-	err = bcrypt.CompareHashAndPassword([]byte(userModel.HashedPassword), []byte(req.Password))
-	if err == bcrypt.ErrMismatchedHashAndPassword {
-		return echo.NewHTTPError(http.StatusUnauthorized, "invalid username or password")
-	}
-	if err != nil {
+	} else if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to compare hash and password: "+err.Error())
 	}
 
@@ -484,19 +544,29 @@ func getUserHandler(c echo.Context) error {
 
 	username := c.Param("username")
 
+	var userModel UserModel
+	if cached, ok := getCachedUserByName(username); ok {
+		userModel = *cached
+	} else {
+		tx, err := dbConn.BeginTxx(ctx, nil)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
+		}
+		defer tx.Rollback()
+		if err := tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE name = ?", username); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusNotFound, "not found user that has the given username")
+			}
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
+		}
+		setCachedUser(&userModel)
+	}
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	userModel := UserModel{}
-	if err := tx.GetContext(ctx, &userModel, "SELECT * FROM users WHERE name = ?", username); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "not found user that has the given username")
-		}
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user: "+err.Error())
-	}
 
 	user, err := fillUserResponse(ctx, tx, userModel)
 	if err != nil {
@@ -532,6 +602,45 @@ func verifyUserSession(c echo.Context) error {
 	}
 
 	return nil
+}
+
+// getUsersByIDsCached は userIDs の順序で UserModel のスライスを返す。キャッシュにあればそれを使い、なければ tx で DB 取得してキャッシュに載せる。
+func getUsersByIDsCached(ctx context.Context, tx *sqlx.Tx, userIDs []int64) ([]UserModel, error) {
+	if len(userIDs) == 0 {
+		return nil, nil
+	}
+	userByID := make(map[int64]*UserModel)
+	uncachedSet := make(map[int64]struct{})
+	for _, id := range userIDs {
+		if c, ok := getCachedUserByID(id); ok {
+			userByID[id] = c
+		} else {
+			uncachedSet[id] = struct{}{}
+		}
+	}
+	uncachedIDs := make([]int64, 0, len(uncachedSet))
+	for id := range uncachedSet {
+		uncachedIDs = append(uncachedIDs, id)
+	}
+	if len(uncachedIDs) > 0 {
+		query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", uncachedIDs)
+		if err != nil {
+			return nil, err
+		}
+		var list []UserModel
+		if err := tx.SelectContext(ctx, &list, query, args...); err != nil {
+			return nil, err
+		}
+		for i := range list {
+			setCachedUser(&list[i])
+			userByID[list[i].ID] = &list[i]
+		}
+	}
+	result := make([]UserModel, 0, len(userIDs))
+	for _, id := range userIDs {
+		result = append(result, *userByID[id])
+	}
+	return result, nil
 }
 
 func fillUserResponse(ctx context.Context, tx *sqlx.Tx, userModel UserModel) (User, error) {
