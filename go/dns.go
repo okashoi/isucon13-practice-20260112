@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	_ "embed"
 	"log"
 	"net"
 	"strings"
@@ -9,6 +11,9 @@ import (
 
 	"github.com/miekg/dns"
 )
+
+//go:embed zone.txt
+var zoneFile string
 
 var (
 	registeredDomains   = make(map[string]struct{})
@@ -26,6 +31,17 @@ func initializeDNSDomains() error {
 	defer registeredDomainsMu.Unlock()
 
 	registeredDomains = make(map[string]struct{})
+
+	// ゾーンファイルの静的エントリを登録
+	scanner := bufio.NewScanner(strings.NewReader(zoneFile))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			registeredDomains[line] = struct{}{}
+		}
+	}
+
+	// DB のユーザー名を登録
 	for _, name := range names {
 		registeredDomains[name] = struct{}{}
 	}
@@ -42,10 +58,6 @@ func registerDNSDomain(name string) {
 
 // isDomainRegistered はサブドメインが登録済みかどうかを返す
 func isDomainRegistered(fqdn string) bool {
-	if fqdn == "pipe.t.isucon.pw." {
-		return true
-	}
-
 	// "username.t.isucon.pw." → "username" を抽出
 	subdomain := strings.TrimSuffix(fqdn, ".t.isucon.pw.")
 	if subdomain == fqdn {
@@ -87,7 +99,7 @@ func startDNSServer() {
 						Name:   q.Name,
 						Rrtype: dns.TypeA,
 						Class:  dns.ClassINET,
-						Ttl:    0,
+						Ttl:    600,
 					},
 					A: ip,
 				})
@@ -120,7 +132,7 @@ func startDNSServer() {
 			}
 		}
 
-		// dnsdist 互換: NXDOMAIN レスポンスを 1 秒遅延させる
+		// NXDOMAIN レスポンスを 1 秒遅延させる
 		if m.Rcode == dns.RcodeNameError {
 			time.Sleep(1 * time.Second)
 		}
