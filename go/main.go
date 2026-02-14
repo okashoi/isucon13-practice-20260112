@@ -30,6 +30,16 @@ var (
 	powerDNSSubdomainAddress string
 	dbConn                   *sqlx.DB
 	secret                   = []byte("isucon13_session_cookiestore_defaultsecret")
+	runInitScript            = func() ([]byte, error) {
+		return exec.Command("../sql/init.sh").CombinedOutput()
+	}
+	triggerPProteinCollect = func() {
+		go func() {
+			if _, err := http.Get("http://18.181.252.154:9000/api/group/collect"); err != nil {
+				log.Printf("failed to communicate with pprotein: %v", err)
+			}
+		}()
+	}
 )
 
 func init() {
@@ -108,7 +118,7 @@ func connectDB(logger echo.Logger) (*sqlx.DB, error) {
 }
 
 func initializeHandler(c echo.Context) error {
-	if out, err := exec.Command("../sql/init.sh").CombinedOutput(); err != nil {
+	if out, err := runInitScript(); err != nil {
 		c.Logger().Warnf("init.sh failed with err=%s", string(out))
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
@@ -118,13 +128,9 @@ func initializeHandler(c echo.Context) error {
 		c.Logger().Warnf("failed to clear icon cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
+	livestreamTagsCache.clear()
 
-	// 追加
-	go func() {
-		if _, err := http.Get("http://18.181.252.154:9000/api/group/collect"); err != nil {
-			log.Printf("failed to communicate with pprotein: %v", err)
-		}
-	}()
+	triggerPProteinCollect()
 
 	c.Request().Header.Add("Content-Type", "application/json;charset=utf-8")
 	return c.JSON(http.StatusOK, InitializeResponse{

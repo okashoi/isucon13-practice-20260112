@@ -1,0 +1,13 @@
+{
+  "task": "Implement using only the files in `.takt/runs/20260214-030736-タスク指示書-タスク名-livestreamt/context/task`.\nPrimary spec: `.takt/runs/20260214-030736-タスク指示書-タスク名-livestreamt/context/task/order.md`.\nUse report files in Report Directory as primary execution history.\nDo not rely on previous response or conversation summary.",
+  "piece": "default",
+  "runSlug": "20260214-030736-タスク指示書-タスク名-livestreamt",
+  "runRoot": ".takt/runs/20260214-030736-タスク指示書-タスク名-livestreamt",
+  "reportDirectory": ".takt/runs/20260214-030736-タスク指示書-タスク名-livestreamt/reports",
+  "contextDirectory": ".takt/runs/20260214-030736-タスク指示書-タスク名-livestreamt/context",
+  "logsDirectory": ".takt/runs/20260214-030736-タスク指示書-タスク名-livestreamt/logs",
+  "status": "completed",
+  "startTime": "2026-02-14T03:08:10.201Z",
+  "endTime": "2026-02-14T03:32:11.992Z",
+  "iterations": 9
+}

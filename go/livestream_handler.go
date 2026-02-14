@@ -166,6 +166,7 @@ func reserveLivestreamHandler(c echo.Context) error {
 	if err := tx.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
+	livestreamTagsCache.invalidate(livestreamID)
 
 	return c.JSON(http.StatusCreated, livestream)
 }
@@ -183,27 +184,26 @@ func searchLivestreamsHandler(c echo.Context) error {
 	var livestreamModels []*LivestreamModel
 	if c.QueryParam("tag") != "" {
 		// タグによる取得
-		var tagIDList []int
+		var tagIDList []int64
 		if err := tx.SelectContext(ctx, &tagIDList, "SELECT id FROM tags WHERE name = ?", keyTagName); err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get tags: "+err.Error())
 		}
-
-		query, params, err := sqlx.In("SELECT * FROM livestream_tags WHERE tag_id IN (?) ORDER BY livestream_id DESC", tagIDList)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
-		}
-		var keyTaggedLivestreams []*LivestreamTagModel
-		if err := tx.SelectContext(ctx, &keyTaggedLivestreams, query, params...); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get keyTaggedLivestreams: "+err.Error())
-		}
-
-		for _, keyTaggedLivestream := range keyTaggedLivestreams {
-			ls := LivestreamModel{}
-			if err := tx.GetContext(ctx, &ls, "SELECT * FROM livestreams WHERE id = ?", keyTaggedLivestream.LivestreamID); err != nil {
+		if len(tagIDList) == 0 {
+			livestreamModels = []*LivestreamModel{}
+		} else {
+			query, args, err := sqlx.In(
+				`SELECT DISTINCT l.* FROM livestreams l
+INNER JOIN livestream_tags lt ON lt.livestream_id = l.id
+WHERE lt.tag_id IN (?)
+ORDER BY l.id DESC`,
+				tagIDList,
+			)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to build query: "+err.Error())
+			}
+			if err := tx.SelectContext(ctx, &livestreamModels, query, args...); err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
 			}
-
-			livestreamModels = append(livestreamModels, &ls)
 		}
 	} else {
 		// 検索条件なし
@@ -531,51 +531,9 @@ func fillLivestreamsResponse(ctx context.Context, tx *sqlx.Tx, livestreamModels 
 		userMap[u.ID] = users[i]
 	}
 
-	// livestream_tags を一括取得
-	query, args, err = sqlx.In("SELECT * FROM livestream_tags WHERE livestream_id IN (?)", livestreamIDs)
+	livestreamTagsMap, err := getLivestreamTagsMap(ctx, tx, livestreamIDs)
 	if err != nil {
 		return nil, err
-	}
-	var allTagModels []LivestreamTagModel
-	if err := tx.SelectContext(ctx, &allTagModels, query, args...); err != nil {
-		return nil, err
-	}
-
-	// tag_id を収集
-	tagIDSet := make(map[int64]struct{})
-	for _, t := range allTagModels {
-		tagIDSet[t.TagID] = struct{}{}
-	}
-	tagIDs := make([]int64, 0, len(tagIDSet))
-	for id := range tagIDSet {
-		tagIDs = append(tagIDs, id)
-	}
-
-	// tags を一括取得
-	tagMap := make(map[int64]TagModel)
-	if len(tagIDs) > 0 {
-		query, args, err = sqlx.In("SELECT * FROM tags WHERE id IN (?)", tagIDs)
-		if err != nil {
-			return nil, err
-		}
-		var tagModels []TagModel
-		if err := tx.SelectContext(ctx, &tagModels, query, args...); err != nil {
-			return nil, err
-		}
-		for _, t := range tagModels {
-			tagMap[t.ID] = t
-		}
-	}
-
-	// livestream_id ごとの tags をマップ化
-	livestreamTagsMap := make(map[int64][]Tag)
-	for _, lt := range allTagModels {
-		if tagModel, ok := tagMap[lt.TagID]; ok {
-			livestreamTagsMap[lt.LivestreamID] = append(livestreamTagsMap[lt.LivestreamID], Tag{
-				ID:   tagModel.ID,
-				Name: tagModel.Name,
-			})
-		}
 	}
 
 	// Livestream を構築
