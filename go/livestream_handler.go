@@ -69,10 +69,24 @@ type ReservationSlotModel struct {
 }
 
 // livestream_tags のオンメモリキャッシュ（key: livestream_id）
+// tagIDToLivestreamIDs: tag_id -> []livestream_id (livestream_id DESC)
 var (
-	livestreamTagCache   = make(map[int64][]LivestreamTagModel)
-	livestreamTagCacheMu sync.RWMutex
+	livestreamTagCache    = make(map[int64][]LivestreamTagModel)
+	tagIDToLivestreamIDs  = make(map[int64][]int64)
+	livestreamTagCacheMu  sync.RWMutex
 )
+
+func getLivestreamIDsByTagID(tagID int64) []int64 {
+	livestreamTagCacheMu.RLock()
+	defer livestreamTagCacheMu.RUnlock()
+	ids, ok := tagIDToLivestreamIDs[tagID]
+	if !ok {
+		return nil
+	}
+	result := make([]int64, len(ids))
+	copy(result, ids)
+	return result
+}
 
 func getLivestreamTagsByLivestreamIDs(livestreamIDs []int64) map[int64][]LivestreamTagModel {
 	if len(livestreamIDs) == 0 {
@@ -95,12 +109,16 @@ func setLivestreamTagsCache(livestreamID int64, tags []LivestreamTagModel) {
 	}
 	livestreamTagCacheMu.Lock()
 	livestreamTagCache[livestreamID] = tags
+	for _, t := range tags {
+		tagIDToLivestreamIDs[t.TagID] = append([]int64{livestreamID}, tagIDToLivestreamIDs[t.TagID]...)
+	}
 	livestreamTagCacheMu.Unlock()
 }
 
 func clearLivestreamTagsCache() {
 	livestreamTagCacheMu.Lock()
 	livestreamTagCache = make(map[int64][]LivestreamTagModel)
+	tagIDToLivestreamIDs = make(map[int64][]int64)
 	livestreamTagCacheMu.Unlock()
 }
 
@@ -113,7 +131,121 @@ func warmUpLivestreamTagsCache(ctx context.Context, db *sqlx.DB) error {
 	for _, lt := range all {
 		livestreamTagCache[lt.LivestreamID] = append(livestreamTagCache[lt.LivestreamID], lt)
 	}
+	// tag_id -> livestream_ids (livestream_id DESC) を構築
+	// allLivestreamIDsDesc の順序で走査すれば DESC になる
+	livestreamCacheMu.RLock()
+	orderedIDs := allLivestreamIDsDesc
+	livestreamCacheMu.RUnlock()
+	for _, livestreamID := range orderedIDs {
+		for _, lt := range livestreamTagCache[livestreamID] {
+			tagIDToLivestreamIDs[lt.TagID] = append(tagIDToLivestreamIDs[lt.TagID], livestreamID)
+		}
+	}
 	livestreamTagCacheMu.Unlock()
+	return nil
+}
+
+// livestreams のオンメモリキャッシュ
+var (
+	livestreamCache      = make(map[int64]LivestreamModel)
+	livestreamsByUserID   = make(map[int64][]int64)
+	allLivestreamIDsDesc []int64
+	livestreamCacheMu    sync.RWMutex
+)
+
+func getLivestreamFromCache(id int64) (LivestreamModel, bool) {
+	livestreamCacheMu.RLock()
+	defer livestreamCacheMu.RUnlock()
+	m, ok := livestreamCache[id]
+	return m, ok
+}
+
+func getLivestreamModelsFromCache(ids []int64) []LivestreamModel {
+	if len(ids) == 0 {
+		return nil
+	}
+	livestreamCacheMu.RLock()
+	defer livestreamCacheMu.RUnlock()
+	result := make([]LivestreamModel, 0, len(ids))
+	seen := make(map[int64]struct{})
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		if m, ok := livestreamCache[id]; ok {
+			result = append(result, m)
+		}
+	}
+	return result
+}
+
+func getLivestreamModelsFromCachePreservingOrder(ids []int64) []LivestreamModel {
+	if len(ids) == 0 {
+		return nil
+	}
+	livestreamCacheMu.RLock()
+	defer livestreamCacheMu.RUnlock()
+	result := make([]LivestreamModel, 0, len(ids))
+	for _, id := range ids {
+		if m, ok := livestreamCache[id]; ok {
+			result = append(result, m)
+		}
+	}
+	return result
+}
+
+func getLivestreamModelsByUserID(userID int64) []LivestreamModel {
+	livestreamCacheMu.RLock()
+	ids, ok := livestreamsByUserID[userID]
+	livestreamCacheMu.RUnlock()
+	if !ok {
+		return nil
+	}
+	return getLivestreamModelsFromCachePreservingOrder(ids)
+}
+
+func getAllLivestreamModelsDesc(limit int) []LivestreamModel {
+	livestreamCacheMu.RLock()
+	ids := allLivestreamIDsDesc
+	livestreamCacheMu.RUnlock()
+	if limit > 0 && limit < len(ids) {
+		ids = ids[:limit]
+	}
+	return getLivestreamModelsFromCachePreservingOrder(ids)
+}
+
+func setLivestreamCache(model LivestreamModel) {
+	livestreamCacheMu.Lock()
+	livestreamCache[model.ID] = model
+	livestreamsByUserID[model.UserID] = append([]int64{model.ID}, livestreamsByUserID[model.UserID]...)
+	allLivestreamIDsDesc = append([]int64{model.ID}, allLivestreamIDsDesc...)
+	livestreamCacheMu.Unlock()
+}
+
+func clearLivestreamCache() {
+	livestreamCacheMu.Lock()
+	livestreamCache = make(map[int64]LivestreamModel)
+	livestreamsByUserID = make(map[int64][]int64)
+	allLivestreamIDsDesc = nil
+	livestreamCacheMu.Unlock()
+}
+
+func warmUpLivestreamCache(ctx context.Context, db *sqlx.DB) error {
+	var all []LivestreamModel
+	if err := db.SelectContext(ctx, &all, "SELECT * FROM livestreams ORDER BY id DESC"); err != nil {
+		return err
+	}
+	livestreamCacheMu.Lock()
+	for _, m := range all {
+		livestreamCache[m.ID] = m
+		livestreamsByUserID[m.UserID] = append(livestreamsByUserID[m.UserID], m.ID)
+	}
+	allLivestreamIDsDesc = make([]int64, len(all))
+	for i, m := range all {
+		allLivestreamIDsDesc[i] = m.ID
+	}
+	livestreamCacheMu.Unlock()
 	return nil
 }
 
@@ -213,6 +345,7 @@ func reserveLivestreamHandler(c echo.Context) error {
 		tagModelsForCache = append(tagModelsForCache, LivestreamTagModel{LivestreamID: livestreamID, TagID: tagID})
 	}
 	setLivestreamTagsCache(livestreamID, tagModelsForCache)
+	setLivestreamCache(*livestreamModel)
 
 	livestream, err := fillLivestreamResponse(ctx, tx, *livestreamModel)
 	if err != nil {
@@ -243,60 +376,29 @@ func searchLivestreamsHandler(c echo.Context) error {
 		if !ok {
 			livestreamModels = []*LivestreamModel{}
 		} else {
-			tagIDList := []int64{tagModel.ID}
-			query, params, err := sqlx.In("SELECT * FROM livestream_tags WHERE tag_id IN (?) ORDER BY livestream_id DESC", tagIDList)
-			if err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
-			}
-			var keyTaggedLivestreams []*LivestreamTagModel
-			if err := tx.SelectContext(ctx, &keyTaggedLivestreams, query, params...); err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get keyTaggedLivestreams: "+err.Error())
-			}
-
-			// 重複を除きつつ livestream_id DESC の順序を保持
-			seen := make(map[int64]struct{})
-			livestreamIDs := make([]int64, 0, len(keyTaggedLivestreams))
-			for _, lt := range keyTaggedLivestreams {
-				if _, ok := seen[lt.LivestreamID]; ok {
-					continue
-				}
-				seen[lt.LivestreamID] = struct{}{}
-				livestreamIDs = append(livestreamIDs, lt.LivestreamID)
-			}
+			livestreamIDs := getLivestreamIDsByTagID(tagModel.ID)
 			if len(livestreamIDs) > 0 {
-				q, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
-				if err != nil {
-					return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
-				}
-				var fetched []LivestreamModel
-				if err := tx.SelectContext(ctx, &fetched, q, args...); err != nil {
-					return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
-				}
-				byID := make(map[int64]*LivestreamModel, len(fetched))
+				fetched := getLivestreamModelsFromCachePreservingOrder(livestreamIDs)
+				livestreamModels = make([]*LivestreamModel, 0, len(fetched))
 				for i := range fetched {
-					byID[fetched[i].ID] = &fetched[i]
-				}
-				livestreamModels = make([]*LivestreamModel, 0, len(livestreamIDs))
-				for _, id := range livestreamIDs {
-					if m, ok := byID[id]; ok {
-						livestreamModels = append(livestreamModels, m)
-					}
+					livestreamModels = append(livestreamModels, &fetched[i])
 				}
 			}
 		}
 	} else {
-		// 検索条件なし
-		query := `SELECT * FROM livestreams ORDER BY id DESC`
+		// 検索条件なし（オンメモリキャッシュから取得）
+		limit := 0
 		if c.QueryParam("limit") != "" {
-			limit, err := strconv.Atoi(c.QueryParam("limit"))
+			var err error
+			limit, err = strconv.Atoi(c.QueryParam("limit"))
 			if err != nil {
 				return echo.NewHTTPError(http.StatusBadRequest, "limit query parameter must be integer")
 			}
-			query += fmt.Sprintf(" LIMIT %d", limit)
 		}
-
-		if err := tx.SelectContext(ctx, &livestreamModels, query); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
+		fetched := getAllLivestreamModelsDesc(limit)
+		livestreamModels = make([]*LivestreamModel, 0, len(fetched))
+		for i := range fetched {
+			livestreamModels = append(livestreamModels, &fetched[i])
 		}
 	}
 
@@ -334,16 +436,7 @@ func getMyLivestreamsHandler(c echo.Context) error {
 	// existence already checked
 	userID := sess.Values[defaultUserIDKey].(int64)
 
-	var livestreamModels []*LivestreamModel
-	if err := tx.SelectContext(ctx, &livestreamModels, "SELECT * FROM livestreams WHERE user_id = ?", userID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
-	}
-
-	// ポインタスライスを値スライスに変換
-	lsModels := make([]LivestreamModel, len(livestreamModels))
-	for i, lsPtr := range livestreamModels {
-		lsModels[i] = *lsPtr
-	}
+	lsModels := getLivestreamModelsByUserID(userID)
 	livestreams, err := fillLivestreamsResponse(ctx, tx, lsModels)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestreams: "+err.Error())
@@ -379,16 +472,7 @@ func getUserLivestreamsHandler(c echo.Context) error {
 		}
 	}
 
-	var livestreamModels []*LivestreamModel
-	if err := tx.SelectContext(ctx, &livestreamModels, "SELECT * FROM livestreams WHERE user_id = ?", user.ID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
-	}
-
-	// ポインタスライスを値スライスに変換
-	lsModels := make([]LivestreamModel, len(livestreamModels))
-	for i, lsPtr := range livestreamModels {
-		lsModels[i] = *lsPtr
-	}
+	lsModels := getLivestreamModelsByUserID(user.ID)
 	livestreams, err := fillLivestreamsResponse(ctx, tx, lsModels)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill livestreams: "+err.Error())
@@ -488,20 +572,16 @@ func getLivestreamHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
 	}
 
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotFound, "not found livestream that has the given id")
+	}
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	livestreamModel := LivestreamModel{}
-	err = tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return echo.NewHTTPError(http.StatusNotFound, "not found livestream that has the given id")
-	}
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
-	}
 
 	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
 	if err != nil {
@@ -527,16 +607,16 @@ func getLivecommentReportsHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "livestream_id in path must be integer")
 	}
 
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
+	}
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	var livestreamModel LivestreamModel
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
-	}
 
 	// error already check
 	sess, _ := session.Get(defaultSessionIDKey, c)
