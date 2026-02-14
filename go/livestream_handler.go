@@ -111,12 +111,8 @@ func reserveLivestreamHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get reservation_slots: "+err.Error())
 	}
 	for _, slot := range slots {
-		var count int
-		if err := tx.GetContext(ctx, &count, "SELECT slot FROM reservation_slots WHERE start_at = ? AND end_at = ?", slot.StartAt, slot.EndAt); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get reservation_slots: "+err.Error())
-		}
 		c.Logger().Infof("%d ~ %d予約枠の残数 = %d\n", slot.StartAt, slot.EndAt, slot.Slot)
-		if count < 1 {
+		if slot.Slot < 1 {
 			return echo.NewHTTPError(http.StatusBadRequest, fmt.Sprintf("予約期間 %d ~ %dに対して、予約区間 %d ~ %dが予約できません", termStartAt.Unix(), termEndAt.Unix(), req.StartAt, req.EndAt))
 		}
 	}
@@ -197,13 +193,35 @@ func searchLivestreamsHandler(c echo.Context) error {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get keyTaggedLivestreams: "+err.Error())
 		}
 
-		for _, keyTaggedLivestream := range keyTaggedLivestreams {
-			ls := LivestreamModel{}
-			if err := tx.GetContext(ctx, &ls, "SELECT * FROM livestreams WHERE id = ?", keyTaggedLivestream.LivestreamID); err != nil {
+		// 重複を除きつつ livestream_id DESC の順序を保持
+		seen := make(map[int64]struct{})
+		livestreamIDs := make([]int64, 0, len(keyTaggedLivestreams))
+		for _, lt := range keyTaggedLivestreams {
+			if _, ok := seen[lt.LivestreamID]; ok {
+				continue
+			}
+			seen[lt.LivestreamID] = struct{}{}
+			livestreamIDs = append(livestreamIDs, lt.LivestreamID)
+		}
+		if len(livestreamIDs) > 0 {
+			q, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
+			}
+			var fetched []LivestreamModel
+			if err := tx.SelectContext(ctx, &fetched, q, args...); err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
 			}
-
-			livestreamModels = append(livestreamModels, &ls)
+			byID := make(map[int64]*LivestreamModel, len(fetched))
+			for i := range fetched {
+				byID[fetched[i].ID] = &fetched[i]
+			}
+			livestreamModels = make([]*LivestreamModel, 0, len(livestreamIDs))
+			for _, id := range livestreamIDs {
+				if m, ok := byID[id]; ok {
+					livestreamModels = append(livestreamModels, m)
+				}
+			}
 		}
 	} else {
 		// 検索条件なし
