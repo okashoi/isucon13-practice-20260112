@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -82,7 +82,7 @@ func reserveLivestreamHandler(c echo.Context) error {
 	userID := sess.Values[defaultUserIDKey].(int64)
 
 	var req *ReserveLivestreamRequest
-	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(c.Request().Body, &req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
@@ -511,13 +511,9 @@ func fillLivestreamsResponse(ctx context.Context, tx *sqlx.Tx, livestreamModels 
 		livestreamIDs[i] = ls.ID
 	}
 
-	// users を一括取得
-	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
+	// users をキャッシュまたはDBから一括取得
+	userModels, err := getUserModelsFromCacheOrDB(ctx, tx, userIDs)
 	if err != nil {
-		return nil, err
-	}
-	var userModels []UserModel
-	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
 		return nil, err
 	}
 
@@ -532,7 +528,7 @@ func fillLivestreamsResponse(ctx context.Context, tx *sqlx.Tx, livestreamModels 
 	}
 
 	// livestream_tags を一括取得
-	query, args, err = sqlx.In("SELECT * FROM livestream_tags WHERE livestream_id IN (?)", livestreamIDs)
+	query, args, err := sqlx.In("SELECT * FROM livestream_tags WHERE livestream_id IN (?)", livestreamIDs)
 	if err != nil {
 		return nil, err
 	}

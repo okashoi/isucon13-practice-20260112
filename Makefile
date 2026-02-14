@@ -4,13 +4,17 @@ APPNAME := isupipe-go.service
 gogo: stop-services build logs/clear start-services
 
 stop-services:
+	sudo systemctl stop dnsdist
+	sudo systemctl stop pdns
 	sudo systemctl stop nginx
 	sudo systemctl stop $(APPNAME)
+	ssh isucon-s3 "sudo systemctl stop $(APPNAME)"
 	ssh isucon-s2 "sudo systemctl stop mysql"
 	# ssh isucon-s2 "sudo systemctl stop mysql"
 
 build:
 	cd go && make
+	scp go/isupipe isucon-s3:/home/isucon/webapp/go/isupipe
 
 logs: limit=10000
 logs: opts=
@@ -32,4 +36,7 @@ start-services:
 	# ssh isucon-s2 "sudo systemctl start mysql"
 	ssh isucon-s2 "sudo systemctl start mysql"
 	sudo systemctl start $(APPNAME)
+	ssh isucon-s3 "sudo systemctl start $(APPNAME)"
 	sudo systemctl start nginx
+	sudo systemctl start pdns
+	sudo systemctl start dnsdist

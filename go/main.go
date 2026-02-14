@@ -5,20 +5,21 @@ package main
 
 import (
 	"fmt"
-	"github.com/go-sql-driver/mysql"
-	"github.com/gorilla/sessions"
-	"github.com/jmoiron/sqlx"
-	echov4 "github.com/kaz/pprotein/integration/echov4"
-	"github.com/labstack/echo-contrib/session"
-	"github.com/labstack/echo/v4"
-	"github.com/labstack/echo/v4/middleware"
-	echolog "github.com/labstack/gommon/log"
 	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
+
+	"github.com/go-sql-driver/mysql"
+	"github.com/gorilla/sessions"
+	"github.com/jmoiron/sqlx"
+	"github.com/kaz/pprotein/integration/echov4"
+	"github.com/labstack/echo-contrib/session"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	echolog "github.com/labstack/gommon/log"
 )
 
 const (
@@ -113,17 +114,17 @@ func initializeHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 
-	// アイコンキャッシュをクリア
+	// アイコン・ユーザーキャッシュをクリア
 	if err := clearIconCache(); err != nil {
 		c.Logger().Warnf("failed to clear icon cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 	// テーマキャッシュをクリア
 	clearThemeCache()
+	clearUserCache()
 
-	// 追加
 	go func() {
-		if _, err := http.Get("http://18.181.252.154:9000/api/group/collect"); err != nil {
+		if _, err := http.Get("http://52.196.128.84:9000/api/group/collect"); err != nil {
 			log.Printf("failed to communicate with pprotein: %v", err)
 		}
 	}()
@@ -134,8 +135,22 @@ func initializeHandler(c echo.Context) error {
 	})
 }
 
+func initializeCacheHandler(c echo.Context) error {
+	if err := clearIconCache(); err != nil {
+		c.Logger().Warnf("failed to clear icon cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear icon cache: "+err.Error())
+	}
+	clearThemeCache()
+	clearUserCache()
+	c.Request().Header.Add("Content-Type", "application/json;charset=utf-8")
+	return c.JSON(http.StatusOK, InitializeResponse{
+		Language: "golang",
+	})
+}
+
 func main() {
 	e := echo.New()
+	e.JSONSerializer = &V2JSONSerializer{}
 	e.Debug = true
 	e.Logger.SetLevel(echolog.DEBUG)
 	e.Use(middleware.Logger())
@@ -147,6 +162,7 @@ func main() {
 	echov4.EnableDebugHandler(e)
 	// 初期化
 	e.POST("/api/initialize", initializeHandler)
+	e.POST("/api/initialize-cache", initializeCacheHandler)
 
 	// top
 	e.GET("/api/tag", getTagHandler)
