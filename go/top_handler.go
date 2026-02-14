@@ -1,12 +1,73 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
+	"sync"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 )
+
+// tags のオンメモリキャッシュ（key: id / name）
+var (
+	tagCacheByID   map[int64]TagModel
+	tagCacheByName map[string]TagModel
+	tagCacheAll    []*Tag
+	tagCacheMu     sync.RWMutex
+)
+
+func warmUpTagsCache(ctx context.Context, db *sqlx.DB) error {
+	var models []TagModel
+	if err := db.SelectContext(ctx, &models, "SELECT * FROM tags"); err != nil {
+		return err
+	}
+	byID := make(map[int64]TagModel, len(models))
+	byName := make(map[string]TagModel, len(models))
+	all := make([]*Tag, len(models))
+	for i := range models {
+		m := &models[i]
+		byID[m.ID] = *m
+		byName[m.Name] = *m
+		all[i] = &Tag{ID: m.ID, Name: m.Name}
+	}
+	tagCacheMu.Lock()
+	tagCacheByID = byID
+	tagCacheByName = byName
+	tagCacheAll = all
+	tagCacheMu.Unlock()
+	return nil
+}
+
+func clearTagsCache() {
+	tagCacheMu.Lock()
+	tagCacheByID = nil
+	tagCacheByName = nil
+	tagCacheAll = nil
+	tagCacheMu.Unlock()
+}
+
+func getTagByID(id int64) (TagModel, bool) {
+	tagCacheMu.RLock()
+	defer tagCacheMu.RUnlock()
+	t, ok := tagCacheByID[id]
+	return t, ok
+}
+
+func getTagByName(name string) (TagModel, bool) {
+	tagCacheMu.RLock()
+	defer tagCacheMu.RUnlock()
+	t, ok := tagCacheByName[name]
+	return t, ok
+}
+
+func getTagCacheAll() []*Tag {
+	tagCacheMu.RLock()
+	defer tagCacheMu.RUnlock()
+	return tagCacheAll
+}
 
 type Tag struct {
 	ID   int64  `json:"id"`
@@ -23,33 +84,7 @@ type TagsResponse struct {
 }
 
 func getTagHandler(c echo.Context) error {
-	ctx := c.Request().Context()
-
-	tx, err := dbConn.BeginTxx(ctx, nil)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin new transaction: : "+err.Error()+err.Error())
-	}
-	defer tx.Rollback()
-
-	var tagModels []*TagModel
-	if err := tx.SelectContext(ctx, &tagModels, "SELECT * FROM tags"); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get tags: "+err.Error())
-	}
-
-	if err := tx.Commit(); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
-	}
-
-	tags := make([]*Tag, len(tagModels))
-	for i := range tagModels {
-		tags[i] = &Tag{
-			ID:   tagModels[i].ID,
-			Name: tagModels[i].Name,
-		}
-	}
-	return c.JSON(http.StatusOK, &TagsResponse{
-		Tags: tags,
-	})
+	return c.JSON(http.StatusOK, &TagsResponse{Tags: getTagCacheAll()})
 }
 
 // 配信者のテーマ取得API
