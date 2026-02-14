@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -38,6 +38,12 @@ var iconCacheDir = "../icons"
 var (
 	iconHashCache   = make(map[int64]string)
 	iconHashCacheMu sync.RWMutex
+)
+
+// ユーザー情報のメモリキャッシュ（SELECT users の削減用）
+var (
+	userCache   = make(map[int64]UserModel)
+	userCacheMu sync.RWMutex
 )
 
 // fallback 画像のハッシュ（起動時に計算）
@@ -97,6 +103,68 @@ func setIconHash(userID int64, hash string) {
 	iconHashCacheMu.Lock()
 	iconHashCache[userID] = hash
 	iconHashCacheMu.Unlock()
+}
+
+func getUserFromCache(userID int64) (UserModel, bool) {
+	userCacheMu.RLock()
+	u, ok := userCache[userID]
+	userCacheMu.RUnlock()
+	return u, ok
+}
+
+func setUserCacheBatch(users []UserModel) {
+	if len(users) == 0 {
+		return
+	}
+	userCacheMu.Lock()
+	for _, u := range users {
+		userCache[u.ID] = u
+	}
+	userCacheMu.Unlock()
+}
+
+func clearUserCache() {
+	userCacheMu.Lock()
+	userCache = make(map[int64]UserModel)
+	userCacheMu.Unlock()
+}
+
+// getUserModelsFromCacheOrDB は userIDs に対応する UserModel をキャッシュまたはDBから取得する
+func getUserModelsFromCacheOrDB(ctx context.Context, tx *sqlx.Tx, userIDs []int64) ([]UserModel, error) {
+	if len(userIDs) == 0 {
+		return []UserModel{}, nil
+	}
+
+	userIDSet := make(map[int64]struct{})
+	for _, id := range userIDs {
+		userIDSet[id] = struct{}{}
+	}
+
+	userModels := make([]UserModel, 0, len(userIDSet))
+	uncachedIDs := make([]int64, 0, len(userIDSet))
+
+	for id := range userIDSet {
+		if u, ok := getUserFromCache(id); ok {
+			userModels = append(userModels, u)
+		} else {
+			uncachedIDs = append(uncachedIDs, id)
+		}
+	}
+
+	if len(uncachedIDs) > 0 {
+		query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", uncachedIDs)
+		if err != nil {
+			return nil, err
+		}
+		var fetched []UserModel
+		if err := tx.SelectContext(ctx, &fetched, query, args...); err != nil {
+			return nil, err
+		}
+		setUserCacheBatch(fetched)
+		userModels = append(userModels, fetched...)
+	}
+
+	return userModels, nil
 }
 
 type UserModel struct {
@@ -256,7 +324,7 @@ func postIconHandler(c echo.Context) error {
 	userID := sess.Values[defaultUserIDKey].(int64)
 
 	var req *PostIconRequest
-	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(c.Request().Body, &req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
@@ -346,7 +414,7 @@ func registerHandler(c echo.Context) error {
 	defer c.Request().Body.Close()
 
 	req := PostUserRequest{}
-	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(c.Request().Body, &req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
@@ -405,6 +473,7 @@ func registerHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
+	setUserCacheBatch([]UserModel{userModel})
 	return c.JSON(http.StatusCreated, user)
 }
 
@@ -415,7 +484,7 @@ func loginHandler(c echo.Context) error {
 	defer c.Request().Body.Close()
 
 	req := LoginRequest{}
-	if err := json.NewDecoder(c.Request().Body).Decode(&req); err != nil {
+	if err := json.UnmarshalRead(c.Request().Body, &req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
