@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/miekg/dns"
 )
@@ -132,9 +131,9 @@ func startDNSServer() {
 			}
 		}
 
-		// NXDOMAIN レスポンスを 1 秒遅延させる
+		// 存在しないドメインにはレスポンスを返さない（タイムアウトさせる）
 		if m.Rcode == dns.RcodeNameError {
-			time.Sleep(1 * time.Second)
+			return
 		}
 
 		w.WriteMsg(m)
