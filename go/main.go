@@ -120,6 +120,11 @@ func initializeHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 	clearUserCache()
+	clearLivestreamTagsCache()
+	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
+		c.Logger().Warnf("failed to warm up livestream tags cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
+	}
 
 	go func() {
 		if _, err := http.Get("http://52.196.128.84:9000/api/group/collect"); err != nil {
@@ -139,6 +144,11 @@ func initializeCacheHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear icon cache: "+err.Error())
 	}
 	clearUserCache()
+	clearLivestreamTagsCache()
+	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
+		c.Logger().Warnf("failed to warm up livestream tags cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear cache: "+err.Error())
+	}
 	c.Request().Header.Add("Content-Type", "application/json;charset=utf-8")
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "golang",
