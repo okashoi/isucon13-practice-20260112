@@ -234,6 +234,12 @@ func main() {
 	}
 	powerDNSSubdomainAddress = subdomainAddr
 
+	// DNS登録ドメインを再構築
+	if err := initializeDNSDomains(); err != nil {
+		e.Logger.Errorf("failed to initialize DNS domains: %v", err)
+		os.Exit(1)
+	}
+
 	// DNSサーバ起動
 	go startDNSServer()
 
