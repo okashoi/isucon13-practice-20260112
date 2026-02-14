@@ -119,6 +119,8 @@ func initializeHandler(c echo.Context) error {
 		c.Logger().Warnf("failed to clear icon cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
+	// UserModel オンメモリキャッシュをクリア
+	clearUserCache()
 
 	go func() {
 		if _, err := http.Get("http://52.196.128.84:9000/api/group/collect"); err != nil {

@@ -412,13 +412,9 @@ func fillLivecommentsResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel
 		livestreamIDs = append(livestreamIDs, id)
 	}
 
-	// users を一括取得
-	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
+	// users を一括取得（オンメモリキャッシュ利用）
+	userModels, err := getUsersByIDsCached(ctx, tx, userIDs)
 	if err != nil {
-		return nil, err
-	}
-	var userModels []UserModel
-	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
 		return nil, err
 	}
 	users, err := fillUsersResponse(ctx, tx, userModels)
@@ -431,7 +427,7 @@ func fillLivecommentsResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel
 	}
 
 	// livestreams を一括取得
-	query, args, err = sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+	query, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -494,13 +490,9 @@ func fillLivecommentReportsResponse(ctx context.Context, tx *sqlx.Tx, reportMode
 		livecommentIDs = append(livecommentIDs, id)
 	}
 
-	// reporter users を一括取得
-	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
+	// reporter users を一括取得（オンメモリキャッシュ利用）
+	userModels, err := getUsersByIDsCached(ctx, tx, userIDs)
 	if err != nil {
-		return nil, err
-	}
-	var userModels []UserModel
-	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
 		return nil, err
 	}
 	users, err := fillUsersResponse(ctx, tx, userModels)
@@ -513,7 +505,7 @@ func fillLivecommentReportsResponse(ctx context.Context, tx *sqlx.Tx, reportMode
 	}
 
 	// livecomments を一括取得
-	query, args, err = sqlx.In("SELECT * FROM livecomments WHERE id IN (?)", livecommentIDs)
+	query, args, err := sqlx.In("SELECT * FROM livecomments WHERE id IN (?)", livecommentIDs)
 	if err != nil {
 		return nil, err
 	}
