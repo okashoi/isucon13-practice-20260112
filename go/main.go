@@ -124,6 +124,17 @@ func initializeHandler(c echo.Context) error {
 	})
 }
 
+func initializeCacheHandler(c echo.Context) error {
+	if err := clearIconCache(); err != nil {
+		c.Logger().Warnf("failed to clear icon cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear icon cache: "+err.Error())
+	}
+	c.Request().Header.Add("Content-Type", "application/json;charset=utf-8")
+	return c.JSON(http.StatusOK, InitializeResponse{
+		Language: "golang",
+	})
+}
+
 func main() {
 	e := echo.New()
 	e.Debug = true
@@ -136,6 +147,7 @@ func main() {
 
 	// 初期化
 	e.POST("/api/initialize", initializeHandler)
+	e.POST("/api/initialize-cache", initializeCacheHandler)
 
 	// top
 	e.GET("/api/tag", getTagHandler)
