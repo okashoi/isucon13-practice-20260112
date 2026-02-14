@@ -119,6 +119,8 @@ func initializeHandler(c echo.Context) error {
 		c.Logger().Warnf("failed to clear icon cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
+	// テーマキャッシュをクリア
+	clearThemeCache()
 	clearUserCache()
 	clearLivestreamTagsCache()
 	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
@@ -143,6 +145,7 @@ func initializeCacheHandler(c echo.Context) error {
 		c.Logger().Warnf("failed to clear icon cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear icon cache: "+err.Error())
 	}
+	clearThemeCache()
 	clearUserCache()
 	clearLivestreamTagsCache()
 	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
