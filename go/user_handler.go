@@ -610,33 +610,41 @@ func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel)
 		}
 	}
 
-	// icon_hash は整合性のため常にDBから取得（キャッシュは参照しない）
-	iconQuery, iconArgs, iconErr := sqlx.In("SELECT user_id, image FROM icons WHERE user_id IN (?)", userIDs)
-	if iconErr != nil {
-		return nil, iconErr
-	}
-	var iconModels []IconModel
-	if err := tx.SelectContext(ctx, &iconModels, iconQuery, iconArgs...); err != nil {
-		return nil, err
-	}
+	// メモリキャッシュにないユーザーIDを収集（main と同じ: キャッシュ優先、未キャッシュのみDB取得）
+	var uncachedUserIDs []int64
 	iconHashMap := make(map[int64]string)
-	iconUserIDSet := make(map[int64]struct{})
-	for _, icon := range iconModels {
-		hash := sha256.Sum256(icon.Image)
-		hashStr := fmt.Sprintf("%x", hash)
-		iconHashMap[icon.UserID] = hashStr
-		setIconHash(icon.UserID, hashStr)
-		iconUserIDSet[icon.UserID] = struct{}{}
-
-		// ファイルにも保存（getIconHandler用）
-		iconPath := getIconPath(icon.UserID)
-		if _, err := os.Stat(iconPath); os.IsNotExist(err) {
-			os.WriteFile(iconPath, icon.Image, 0644)
+	for _, userID := range userIDs {
+		if hash, ok := getIconHash(userID); ok {
+			iconHashMap[userID] = hash
+		} else {
+			uncachedUserIDs = append(uncachedUserIDs, userID)
 		}
 	}
-	for _, userID := range userIDs {
-		if _, ok := iconUserIDSet[userID]; !ok {
-			iconHashMap[userID] = fallbackImageHash
+	if len(uncachedUserIDs) > 0 {
+		iconQuery, iconArgs, iconErr := sqlx.In("SELECT user_id, image FROM icons WHERE user_id IN (?)", uncachedUserIDs)
+		if iconErr != nil {
+			return nil, iconErr
+		}
+		var iconModels []IconModel
+		if err := tx.SelectContext(ctx, &iconModels, iconQuery, iconArgs...); err != nil {
+			return nil, err
+		}
+		iconUserIDSet := make(map[int64]struct{})
+		for _, icon := range iconModels {
+			hash := sha256.Sum256(icon.Image)
+			hashStr := fmt.Sprintf("%x", hash)
+			iconHashMap[icon.UserID] = hashStr
+			setIconHash(icon.UserID, hashStr)
+			iconUserIDSet[icon.UserID] = struct{}{}
+			iconPath := getIconPath(icon.UserID)
+			if _, err := os.Stat(iconPath); os.IsNotExist(err) {
+				os.WriteFile(iconPath, icon.Image, 0644)
+			}
+		}
+		for _, userID := range uncachedUserIDs {
+			if _, ok := iconUserIDSet[userID]; !ok {
+				iconHashMap[userID] = fallbackImageHash
+			}
 		}
 	}
 
