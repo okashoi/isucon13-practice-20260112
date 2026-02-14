@@ -7,7 +7,6 @@ import (
 	"net"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/miekg/dns"
 )
@@ -82,7 +81,6 @@ func startDNSServer() {
 	}
 
 	handler := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		time.Sleep(1 * time.Second)
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.Authoritative = true
