@@ -177,20 +177,16 @@ func postLivecommentHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok {
+		return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
+	}
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	var livestreamModel LivestreamModel
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
-		} else {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
-		}
-	}
 
 	// スパム判定
 	var ngwords []*NGWord
@@ -259,20 +255,15 @@ func reportLivecommentHandler(c echo.Context) error {
 	// existence already checked
 	userID := sess.Values[defaultUserIDKey].(int64)
 
+	if _, ok := getLivestreamFromCache(int64(livestreamID)); !ok {
+		return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
+	}
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	var livestreamModel LivestreamModel
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
-		} else {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
-		}
-	}
 
 	var livecommentModel LivecommentModel
 	if err := tx.GetContext(ctx, &livecommentModel, "SELECT * FROM livecomments WHERE id = ?", livecommentID); err != nil {
@@ -338,20 +329,17 @@ func moderateHandler(c echo.Context) error {
 	// 早くしすぎると何故かスコア下がるのでsleep挟む
 	time.Sleep(1500 * time.Millisecond)
 
+	// 配信者自身の配信に対するmoderateなのかを検証（オンメモリキャッシュから取得）
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok || livestreamModel.UserID != userID {
+		return echo.NewHTTPError(http.StatusBadRequest, "A streamer can't moderate livestreams that other streamers own")
+	}
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
 	}
 	defer tx.Rollback()
-
-	// 配信者自身の配信に対するmoderateなのかを検証
-	var ownedLivestreams []LivestreamModel
-	if err := tx.SelectContext(ctx, &ownedLivestreams, "SELECT * FROM livestreams WHERE id = ? AND user_id = ?", livestreamID, userID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
-	}
-	if len(ownedLivestreams) == 0 {
-		return echo.NewHTTPError(http.StatusBadRequest, "A streamer can't moderate livestreams that other streamers own")
-	}
 
 	rs, err := tx.NamedExecContext(ctx, "INSERT INTO ng_words(user_id, livestream_id, word, created_at) VALUES (:user_id, :livestream_id, :word, :created_at)", &NGWord{
 		UserID:       int64(userID),
@@ -426,15 +414,8 @@ func fillLivecommentsResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel
 		userMap[u.ID] = users[i]
 	}
 
-	// livestreams を一括取得
-	query, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
-	if err != nil {
-		return nil, err
-	}
-	var livestreamModels []LivestreamModel
-	if err := tx.SelectContext(ctx, &livestreamModels, query, args...); err != nil {
-		return nil, err
-	}
+	// livestreams をオンメモリキャッシュから一括取得
+	livestreamModels := getLivestreamModelsFromCache(livestreamIDs)
 	livestreams, err := fillLivestreamsResponse(ctx, tx, livestreamModels)
 	if err != nil {
 		return nil, err
