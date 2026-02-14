@@ -123,8 +123,13 @@ func initializeHandler(c echo.Context) error {
 	clearThemeCache()
 	clearUserCache()
 	clearLivestreamTagsCache()
+	clearTagsCache()
 	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
 		c.Logger().Warnf("failed to warm up livestream tags cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
+	}
+	if err := warmUpTagsCache(c.Request().Context(), dbConn); err != nil {
+		c.Logger().Warnf("failed to warm up tags cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 
@@ -148,8 +153,13 @@ func initializeCacheHandler(c echo.Context) error {
 	clearThemeCache()
 	clearUserCache()
 	clearLivestreamTagsCache()
+	clearTagsCache()
 	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
 		c.Logger().Warnf("failed to warm up livestream tags cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear cache: "+err.Error())
+	}
+	if err := warmUpTagsCache(c.Request().Context(), dbConn); err != nil {
+		c.Logger().Warnf("failed to warm up tags cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear cache: "+err.Error())
 	}
 	c.Request().Header.Add("Content-Type", "application/json;charset=utf-8")
