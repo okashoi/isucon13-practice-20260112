@@ -238,48 +238,49 @@ func searchLivestreamsHandler(c echo.Context) error {
 
 	var livestreamModels []*LivestreamModel
 	if c.QueryParam("tag") != "" {
-		// タグによる取得
-		var tagIDList []int
-		if err := tx.SelectContext(ctx, &tagIDList, "SELECT id FROM tags WHERE name = ?", keyTagName); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get tags: "+err.Error())
-		}
-
-		query, params, err := sqlx.In("SELECT * FROM livestream_tags WHERE tag_id IN (?) ORDER BY livestream_id DESC", tagIDList)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
-		}
-		var keyTaggedLivestreams []*LivestreamTagModel
-		if err := tx.SelectContext(ctx, &keyTaggedLivestreams, query, params...); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get keyTaggedLivestreams: "+err.Error())
-		}
-
-		// 重複を除きつつ livestream_id DESC の順序を保持
-		seen := make(map[int64]struct{})
-		livestreamIDs := make([]int64, 0, len(keyTaggedLivestreams))
-		for _, lt := range keyTaggedLivestreams {
-			if _, ok := seen[lt.LivestreamID]; ok {
-				continue
-			}
-			seen[lt.LivestreamID] = struct{}{}
-			livestreamIDs = append(livestreamIDs, lt.LivestreamID)
-		}
-		if len(livestreamIDs) > 0 {
-			q, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+		// タグによる取得（オンメモリキャッシュから解決）
+		tagModel, ok := getTagByName(keyTagName)
+		if !ok {
+			livestreamModels = []*LivestreamModel{}
+		} else {
+			tagIDList := []int64{tagModel.ID}
+			query, params, err := sqlx.In("SELECT * FROM livestream_tags WHERE tag_id IN (?) ORDER BY livestream_id DESC", tagIDList)
 			if err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
 			}
-			var fetched []LivestreamModel
-			if err := tx.SelectContext(ctx, &fetched, q, args...); err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
+			var keyTaggedLivestreams []*LivestreamTagModel
+			if err := tx.SelectContext(ctx, &keyTaggedLivestreams, query, params...); err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get keyTaggedLivestreams: "+err.Error())
 			}
-			byID := make(map[int64]*LivestreamModel, len(fetched))
-			for i := range fetched {
-				byID[fetched[i].ID] = &fetched[i]
+
+			// 重複を除きつつ livestream_id DESC の順序を保持
+			seen := make(map[int64]struct{})
+			livestreamIDs := make([]int64, 0, len(keyTaggedLivestreams))
+			for _, lt := range keyTaggedLivestreams {
+				if _, ok := seen[lt.LivestreamID]; ok {
+					continue
+				}
+				seen[lt.LivestreamID] = struct{}{}
+				livestreamIDs = append(livestreamIDs, lt.LivestreamID)
 			}
-			livestreamModels = make([]*LivestreamModel, 0, len(livestreamIDs))
-			for _, id := range livestreamIDs {
-				if m, ok := byID[id]; ok {
-					livestreamModels = append(livestreamModels, m)
+			if len(livestreamIDs) > 0 {
+				q, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+				if err != nil {
+					return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
+				}
+				var fetched []LivestreamModel
+				if err := tx.SelectContext(ctx, &fetched, q, args...); err != nil {
+					return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
+				}
+				byID := make(map[int64]*LivestreamModel, len(fetched))
+				for i := range fetched {
+					byID[fetched[i].ID] = &fetched[i]
+				}
+				livestreamModels = make([]*LivestreamModel, 0, len(livestreamIDs))
+				for _, id := range livestreamIDs {
+					if m, ok := byID[id]; ok {
+						livestreamModels = append(livestreamModels, m)
+					}
 				}
 			}
 		}
@@ -622,19 +623,11 @@ func fillLivestreamsResponse(ctx context.Context, tx *sqlx.Tx, livestreamModels 
 		tagIDs = append(tagIDs, id)
 	}
 
-	// tags を一括取得
-	tagMap := make(map[int64]TagModel)
-	if len(tagIDs) > 0 {
-		tagQuery, tagArgs, err := sqlx.In("SELECT * FROM tags WHERE id IN (?)", tagIDs)
-		if err != nil {
-			return nil, err
-		}
-		var tagModels []TagModel
-		if err := tx.SelectContext(ctx, &tagModels, tagQuery, tagArgs...); err != nil {
-			return nil, err
-		}
-		for _, t := range tagModels {
-			tagMap[t.ID] = t
+	// tags をオンメモリキャッシュから取得
+	tagMap := make(map[int64]TagModel, len(tagIDs))
+	for _, id := range tagIDs {
+		if t, ok := getTagByID(id); ok {
+			tagMap[id] = t
 		}
 	}
 
