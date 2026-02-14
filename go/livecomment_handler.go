@@ -336,7 +336,7 @@ func moderateHandler(c echo.Context) error {
 	}
 
 	// 早くしすぎると何故かスコア下がるのでsleep挟む
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(1500 * time.Millisecond)
 
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
