@@ -1,7 +1,7 @@
 DARWIN_TARGET_ENV=GOOS=darwin GOARCH=arm64
 LINUX_TARGET_ENV=GOOS=linux GOARCH=amd64
 
-BUILD=go build
+BUILD=GOEXPERIMENT=jsonv2 go build
 
 DOCKER_BUILD=sudo docker build
 DOCKER_BUILD_OPTS=--no-cache
