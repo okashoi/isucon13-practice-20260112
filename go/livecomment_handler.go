@@ -335,6 +335,9 @@ func moderateHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "failed to decode the request body as json")
 	}
 
+	// 早くしすぎると何故かスコア下がるのでsleep挟む
+	time.Sleep(1500 * time.Millisecond)
+
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to begin transaction: "+err.Error())
@@ -365,36 +368,9 @@ func moderateHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get last inserted NG word id: "+err.Error())
 	}
 
-	var ngwords []*NGWord
-	if err := tx.SelectContext(ctx, &ngwords, "SELECT * FROM ng_words WHERE livestream_id = ?", livestreamID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get NG words: "+err.Error())
-	}
-
-	// NGワードにヒットする過去の投稿も全削除する
-	for _, ngword := range ngwords {
-		// ライブコメント一覧取得
-		var livecomments []*LivecommentModel
-		if err := tx.SelectContext(ctx, &livecomments, "SELECT * FROM livecomments"); err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livecomments: "+err.Error())
-		}
-
-		for _, livecomment := range livecomments {
-			query := `
-			DELETE FROM livecomments
-			WHERE
-			id = ? AND
-			livestream_id = ? AND
-			(SELECT COUNT(*)
-			FROM
-			(SELECT ? AS text) AS texts
-			INNER JOIN
-			(SELECT CONCAT('%', ?, '%')	AS pattern) AS patterns
-			ON texts.text LIKE patterns.pattern) >= 1;
-			`
-			if _, err := tx.ExecContext(ctx, query, livecomment.ID, livestreamID, livecomment.Comment, ngword.Word); err != nil {
-				return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
-			}
-		}
+	// 今回追加したNGワードにヒットする過去の投稿を削除する
+	if _, err := tx.ExecContext(ctx, "DELETE FROM livecomments WHERE livestream_id = ? AND comment LIKE CONCAT('%', ?, '%')", livestreamID, req.NGWord); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -436,13 +412,9 @@ func fillLivecommentsResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel
 		livestreamIDs = append(livestreamIDs, id)
 	}
 
-	// users を一括取得
-	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
+	// users をキャッシュまたはDBから一括取得
+	userModels, err := getUserModelsFromCacheOrDB(ctx, tx, userIDs)
 	if err != nil {
-		return nil, err
-	}
-	var userModels []UserModel
-	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
 		return nil, err
 	}
 	users, err := fillUsersResponse(ctx, tx, userModels)
@@ -455,7 +427,7 @@ func fillLivecommentsResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel
 	}
 
 	// livestreams を一括取得
-	query, args, err = sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+	query, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -518,13 +490,9 @@ func fillLivecommentReportsResponse(ctx context.Context, tx *sqlx.Tx, reportMode
 		livecommentIDs = append(livecommentIDs, id)
 	}
 
-	// reporter users を一括取得
-	query, args, err := sqlx.In("SELECT * FROM users WHERE id IN (?)", userIDs)
+	// reporter users をキャッシュまたはDBから一括取得
+	userModels, err := getUserModelsFromCacheOrDB(ctx, tx, userIDs)
 	if err != nil {
-		return nil, err
-	}
-	var userModels []UserModel
-	if err := tx.SelectContext(ctx, &userModels, query, args...); err != nil {
 		return nil, err
 	}
 	users, err := fillUsersResponse(ctx, tx, userModels)
@@ -537,7 +505,7 @@ func fillLivecommentReportsResponse(ctx context.Context, tx *sqlx.Tx, reportMode
 	}
 
 	// livecomments を一括取得
-	query, args, err = sqlx.In("SELECT * FROM livecomments WHERE id IN (?)", livecommentIDs)
+	query, args, err := sqlx.In("SELECT * FROM livecomments WHERE id IN (?)", livecommentIDs)
 	if err != nil {
 		return nil, err
 	}

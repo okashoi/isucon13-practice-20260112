@@ -114,11 +114,14 @@ func initializeHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 
-	// アイコンキャッシュをクリア
+	// アイコン・ユーザーキャッシュをクリア
 	if err := clearIconCache(); err != nil {
 		c.Logger().Warnf("failed to clear icon cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
+	// テーマキャッシュをクリア
+	clearThemeCache()
+	clearUserCache()
 
 	// DNS登録ドメインを再構築
 	if err := initializeDNSDomains(); err != nil {
@@ -143,6 +146,8 @@ func initializeCacheHandler(c echo.Context) error {
 		c.Logger().Warnf("failed to clear icon cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear icon cache: "+err.Error())
 	}
+	clearThemeCache()
+	clearUserCache()
 	c.Request().Header.Add("Content-Type", "application/json;charset=utf-8")
 	return c.JSON(http.StatusOK, InitializeResponse{
 		Language: "golang",
