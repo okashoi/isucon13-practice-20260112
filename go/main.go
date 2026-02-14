@@ -228,6 +228,9 @@ func main() {
 	}
 	powerDNSSubdomainAddress = subdomainAddr
 
+	// DNSサーバ起動
+	go startDNSServer()
+
 	// アイコンキャッシュを初期化
 	if err := initIconCache(); err != nil {
 		e.Logger.Errorf("failed to initialize icon cache: %v", err)
