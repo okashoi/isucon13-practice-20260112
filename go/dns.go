@@ -42,6 +42,10 @@ func registerDNSDomain(name string) {
 
 // isDomainRegistered はサブドメインが登録済みかどうかを返す
 func isDomainRegistered(fqdn string) bool {
+	if fqdn == "pipe.t.isucon.pw." {
+		return true
+	}
+
 	// "username.t.isucon.pw." → "username" を抽出
 	subdomain := strings.TrimSuffix(fqdn, ".t.isucon.pw.")
 	if subdomain == fqdn {
