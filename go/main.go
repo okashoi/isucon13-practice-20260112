@@ -120,6 +120,12 @@ func initializeHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 
+	// DNS登録ドメインを再構築
+	if err := initializeDNSDomains(); err != nil {
+		c.Logger().Warnf("failed to initialize DNS domains: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
+	}
+
 	go func() {
 		if _, err := http.Get("http://52.196.128.84:9000/api/group/collect"); err != nil {
 			log.Printf("failed to communicate with pprotein: %v", err)

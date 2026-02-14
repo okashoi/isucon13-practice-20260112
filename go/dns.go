@@ -3,9 +3,61 @@ package main
 import (
 	"log"
 	"net"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 )
+
+var (
+	registeredDomains   = make(map[string]struct{})
+	registeredDomainsMu sync.RWMutex
+)
+
+// initializeDNSDomains は DB から登録済みユーザー名を読み込み、DNS 解決対象ドメインを再構築する
+func initializeDNSDomains() error {
+	var names []string
+	if err := dbConn.Select(&names, "SELECT name FROM users"); err != nil {
+		return err
+	}
+
+	registeredDomainsMu.Lock()
+	defer registeredDomainsMu.Unlock()
+
+	registeredDomains = make(map[string]struct{})
+	for _, name := range names {
+		registeredDomains[name] = struct{}{}
+	}
+
+	return nil
+}
+
+// registerDNSDomain はユーザー登録時にドメインを追加する
+func registerDNSDomain(name string) {
+	registeredDomainsMu.Lock()
+	registeredDomains[name] = struct{}{}
+	registeredDomainsMu.Unlock()
+}
+
+// isDomainRegistered はサブドメインが登録済みかどうかを返す
+func isDomainRegistered(fqdn string) bool {
+	// "username.t.isucon.pw." → "username" を抽出
+	subdomain := strings.TrimSuffix(fqdn, ".t.isucon.pw.")
+	if subdomain == fqdn {
+		// t.isucon.pw ゾーン外のクエリ
+		return false
+	}
+	// "t.isucon.pw." 自体へのクエリ (subdomain == "")
+	if subdomain == "" {
+		return true
+	}
+
+	registeredDomainsMu.RLock()
+	_, ok := registeredDomains[subdomain]
+	registeredDomainsMu.RUnlock()
+	return ok
+}
 
 func startDNSServer() {
 	ip := net.ParseIP(powerDNSSubdomainAddress)
@@ -19,6 +71,11 @@ func startDNSServer() {
 		m.Authoritative = true
 
 		for _, q := range r.Question {
+			if !isDomainRegistered(q.Name) {
+				m.Rcode = dns.RcodeNameError
+				continue
+			}
+
 			switch q.Qtype {
 			case dns.TypeA:
 				m.Answer = append(m.Answer, &dns.A{
@@ -57,6 +114,11 @@ func startDNSServer() {
 					Minttl:  3600,
 				})
 			}
+		}
+
+		// dnsdist 互換: NXDOMAIN レスポンスを 1 秒遅延させる
+		if m.Rcode == dns.RcodeNameError {
+			time.Sleep(1 * time.Second)
 		}
 
 		w.WriteMsg(m)

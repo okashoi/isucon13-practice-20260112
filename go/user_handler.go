@@ -400,6 +400,8 @@ func registerHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
+	registerDNSDomain(req.Name)
+
 	return c.JSON(http.StatusCreated, user)
 }
 
