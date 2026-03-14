@@ -125,6 +125,7 @@ func initializeHandler(c echo.Context) error {
 	clearLivestreamCache()
 	clearLivestreamTagsCache()
 	clearTagsCache()
+	clearNgWordCache()
 	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
 		c.Logger().Warnf("failed to warm up livestream tags cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
@@ -162,6 +163,7 @@ func initializeCacheHandler(c echo.Context) error {
 	clearLivestreamCache()
 	clearLivestreamTagsCache()
 	clearTagsCache()
+	clearNgWordCache()
 	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
 		c.Logger().Warnf("failed to warm up livestream tags cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear cache: "+err.Error())
