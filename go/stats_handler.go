@@ -194,45 +194,8 @@ func getUserStatisticsHandler(c echo.Context) error {
 		}
 	}
 
-	// ランク算出: オンメモリキャッシュから全ユーザーのスコアを取得
-	allScores := getAllUserScores()
-	var rank int64
-	// 対象ユーザーがキャッシュにない場合（initialize未呼び出し等）はDBからランキングを取得
-	if _, ok := allScores[user.ID]; !ok {
-		rank = getUserRankFromDB(ctx, tx, username)
-	} else {
-		userIDs := make([]int64, 0, len(allScores))
-		for uid := range allScores {
-			userIDs = append(userIDs, uid)
-		}
-		userModels, err := getUserModelsFromCacheOrDB(ctx, tx, userIDs)
-		if err != nil {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user models for ranking: "+err.Error())
-		}
-		userNameMap := make(map[int64]string, len(userModels))
-		for _, u := range userModels {
-			userNameMap[u.ID] = u.Name
-		}
-
-		var ranking UserRanking
-		for uid, score := range allScores {
-			name := userNameMap[uid]
-			ranking = append(ranking, UserRankingEntry{
-				Username: name,
-				Score:    score,
-			})
-		}
-		sort.Sort(ranking)
-
-		rank = 1
-		for i := len(ranking) - 1; i >= 0; i-- {
-			entry := ranking[i]
-			if entry.Username == username {
-				break
-			}
-			rank++
-		}
-	}
+	// ランク算出: 整合性を保つため常にDBから取得（オンメモリキャッシュは複数プロセス・initialize未呼び出し等で不整合になるため）
+	rank := getUserRankFromDB(ctx, tx, username)
 
 	// 対象ユーザーの統計を一括取得
 	var userStats struct {
