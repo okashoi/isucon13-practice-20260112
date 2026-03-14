@@ -79,6 +79,41 @@ func warmUpUserScoreCache(ctx context.Context, db *sqlx.DB) error {
 	return nil
 }
 
+// getUserRankFromDB はDBから全ユーザーのスコアを取得してランクを算出する（キャッシュ未構築時のフォールバック）
+func getUserRankFromDB(ctx context.Context, tx *sqlx.Tx, username string) int64 {
+	query := `
+		SELECT u.id AS user_id, u.name AS user_name,
+		       IFNULL(SUM(r.reaction_count), 0) + IFNULL(SUM(lc.tip_sum), 0) AS score
+		FROM users u
+		LEFT JOIN livestreams l ON l.user_id = u.id
+		LEFT JOIN (SELECT livestream_id, COUNT(*) AS reaction_count FROM reactions GROUP BY livestream_id) r ON r.livestream_id = l.id
+		LEFT JOIN (SELECT livestream_id, SUM(tip) AS tip_sum FROM livecomments GROUP BY livestream_id) lc ON lc.livestream_id = l.id
+		GROUP BY u.id, u.name
+	`
+	type userScoreWithName struct {
+		UserID   int64  `db:"user_id"`
+		UserName string `db:"user_name"`
+		Score    int64  `db:"score"`
+	}
+	var rows []userScoreWithName
+	if err := tx.SelectContext(ctx, &rows, query); err != nil {
+		return 1
+	}
+	var ranking UserRanking
+	for _, r := range rows {
+		ranking = append(ranking, UserRankingEntry{Username: r.UserName, Score: r.Score})
+	}
+	sort.Sort(ranking)
+	var rank int64 = 1
+	for i := len(ranking) - 1; i >= 0; i-- {
+		if ranking[i].Username == username {
+			break
+		}
+		rank++
+	}
+	return rank
+}
+
 type LivestreamStatistics struct {
 	Rank           int64 `json:"rank"`
 	ViewersCount   int64 `json:"viewers_count"`
@@ -161,36 +196,42 @@ func getUserStatisticsHandler(c echo.Context) error {
 
 	// ランク算出: オンメモリキャッシュから全ユーザーのスコアを取得
 	allScores := getAllUserScores()
-	userIDs := make([]int64, 0, len(allScores))
-	for uid := range allScores {
-		userIDs = append(userIDs, uid)
-	}
-	userModels, err := getUserModelsFromCacheOrDB(ctx, tx, userIDs)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user models for ranking: "+err.Error())
-	}
-	userNameMap := make(map[int64]string, len(userModels))
-	for _, u := range userModels {
-		userNameMap[u.ID] = u.Name
-	}
-
-	var ranking UserRanking
-	for uid, score := range allScores {
-		name := userNameMap[uid]
-		ranking = append(ranking, UserRankingEntry{
-			Username: name,
-			Score:    score,
-		})
-	}
-	sort.Sort(ranking)
-
-	var rank int64 = 1
-	for i := len(ranking) - 1; i >= 0; i-- {
-		entry := ranking[i]
-		if entry.Username == username {
-			break
+	var rank int64
+	// 対象ユーザーがキャッシュにない場合（initialize未呼び出し等）はDBからランキングを取得
+	if _, ok := allScores[user.ID]; !ok {
+		rank = getUserRankFromDB(ctx, tx, username)
+	} else {
+		userIDs := make([]int64, 0, len(allScores))
+		for uid := range allScores {
+			userIDs = append(userIDs, uid)
 		}
-		rank++
+		userModels, err := getUserModelsFromCacheOrDB(ctx, tx, userIDs)
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user models for ranking: "+err.Error())
+		}
+		userNameMap := make(map[int64]string, len(userModels))
+		for _, u := range userModels {
+			userNameMap[u.ID] = u.Name
+		}
+
+		var ranking UserRanking
+		for uid, score := range allScores {
+			name := userNameMap[uid]
+			ranking = append(ranking, UserRankingEntry{
+				Username: name,
+				Score:    score,
+			})
+		}
+		sort.Sort(ranking)
+
+		rank = 1
+		for i := len(ranking) - 1; i >= 0; i-- {
+			entry := ranking[i]
+			if entry.Username == username {
+				break
+			}
+			rank++
+		}
 	}
 
 	// 対象ユーザーの統計を一括取得
