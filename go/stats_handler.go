@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	"github.com/labstack/echo/v4"
+	"golang.org/x/sync/singleflight"
 )
 
 type LivestreamStatistics struct {
@@ -66,6 +67,11 @@ type UserScoreEntry struct {
 	Score    int64  `db:"score"`
 }
 
+var (
+	userRankingSF       singleflight.Group
+	livestreamRankingSF singleflight.Group
+)
+
 func getUserStatisticsHandler(c echo.Context) error {
 	ctx := c.Request().Context()
 
@@ -93,40 +99,46 @@ func getUserStatisticsHandler(c echo.Context) error {
 		}
 	}
 
-	// ランク算出: 全ユーザーのスコア（リアクション数 + チップ合計）を一括取得
-	var userScores []UserScoreEntry
-	rankQuery := `
-		SELECT
-			u.id AS user_id,
-			u.name AS username,
-			IFNULL(SUM(r.reaction_count), 0) + IFNULL(SUM(lc.tip_sum), 0) AS score
-		FROM users u
-		LEFT JOIN livestreams l ON l.user_id = u.id
-		LEFT JOIN (
-			SELECT livestream_id, COUNT(*) AS reaction_count
-			FROM reactions
-			GROUP BY livestream_id
-		) r ON r.livestream_id = l.id
-		LEFT JOIN (
-			SELECT livestream_id, SUM(tip) AS tip_sum
-			FROM livecomments
-			GROUP BY livestream_id
-		) lc ON lc.livestream_id = l.id
-		GROUP BY u.id, u.name
-	`
-	if err := tx.SelectContext(ctx, &userScores, rankQuery); err != nil {
+	// ランク算出: 全ユーザーのスコアを singleflight で一括取得（同時リクエストで共有）
+	rankingResult, err, _ := userRankingSF.Do("ranking", func() (interface{}, error) {
+		var scores []UserScoreEntry
+		rankQuery := `
+			SELECT
+				u.id AS user_id,
+				u.name AS username,
+				IFNULL(SUM(r.reaction_count), 0) + IFNULL(SUM(lc.tip_sum), 0) AS score
+			FROM users u
+			LEFT JOIN livestreams l ON l.user_id = u.id
+			LEFT JOIN (
+				SELECT livestream_id, COUNT(*) AS reaction_count
+				FROM reactions
+				GROUP BY livestream_id
+			) r ON r.livestream_id = l.id
+			LEFT JOIN (
+				SELECT livestream_id, SUM(tip) AS tip_sum
+				FROM livecomments
+				GROUP BY livestream_id
+			) lc ON lc.livestream_id = l.id
+			GROUP BY u.id, u.name
+		`
+		if err := dbConn.SelectContext(ctx, &scores, rankQuery); err != nil {
+			return nil, err
+		}
+
+		var ranking UserRanking
+		for _, us := range scores {
+			ranking = append(ranking, UserRankingEntry{
+				Username: us.Username,
+				Score:    us.Score,
+			})
+		}
+		sort.Sort(ranking)
+		return ranking, nil
+	})
+	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user scores: "+err.Error())
 	}
-
-	// ランキングをソート
-	var ranking UserRanking
-	for _, us := range userScores {
-		ranking = append(ranking, UserRankingEntry{
-			Username: us.Username,
-			Score:    us.Score,
-		})
-	}
-	sort.Sort(ranking)
+	ranking := rankingResult.(UserRanking)
 
 	var rank int64 = 1
 	for i := len(ranking) - 1; i >= 0; i-- {
@@ -233,37 +245,43 @@ func getLivestreamStatisticsHandler(c echo.Context) error {
 		}
 	}
 
-	// ランク算出: 全ライブストリームのスコア（リアクション数 + チップ合計）を一括取得
-	var livestreamScores []LivestreamScoreEntry
-	rankQuery := `
-		SELECT
-			l.id AS livestream_id,
-			IFNULL(r.reaction_count, 0) + IFNULL(lc.tip_sum, 0) AS score
-		FROM livestreams l
-		LEFT JOIN (
-			SELECT livestream_id, COUNT(*) AS reaction_count
-			FROM reactions
-			GROUP BY livestream_id
-		) r ON r.livestream_id = l.id
-		LEFT JOIN (
-			SELECT livestream_id, SUM(tip) AS tip_sum
-			FROM livecomments
-			GROUP BY livestream_id
-		) lc ON lc.livestream_id = l.id
-	`
-	if err := tx.SelectContext(ctx, &livestreamScores, rankQuery); err != nil {
+	// ランク算出: 全ライブストリームのスコアを singleflight で一括取得（同時リクエストで共有）
+	rankingResult, err, _ := livestreamRankingSF.Do("ranking", func() (interface{}, error) {
+		var scores []LivestreamScoreEntry
+		rankQuery := `
+			SELECT
+				l.id AS livestream_id,
+				IFNULL(r.reaction_count, 0) + IFNULL(lc.tip_sum, 0) AS score
+			FROM livestreams l
+			LEFT JOIN (
+				SELECT livestream_id, COUNT(*) AS reaction_count
+				FROM reactions
+				GROUP BY livestream_id
+			) r ON r.livestream_id = l.id
+			LEFT JOIN (
+				SELECT livestream_id, SUM(tip) AS tip_sum
+				FROM livecomments
+				GROUP BY livestream_id
+			) lc ON lc.livestream_id = l.id
+		`
+		if err := dbConn.SelectContext(ctx, &scores, rankQuery); err != nil {
+			return nil, err
+		}
+
+		var ranking LivestreamRanking
+		for _, ls := range scores {
+			ranking = append(ranking, LivestreamRankingEntry{
+				LivestreamID: ls.LivestreamID,
+				Score:        ls.Score,
+			})
+		}
+		sort.Sort(ranking)
+		return ranking, nil
+	})
+	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream scores: "+err.Error())
 	}
-
-	// ランキングをソート
-	var ranking LivestreamRanking
-	for _, ls := range livestreamScores {
-		ranking = append(ranking, LivestreamRankingEntry{
-			LivestreamID: ls.LivestreamID,
-			Score:        ls.Score,
-		})
-	}
-	sort.Sort(ranking)
+	ranking := rankingResult.(LivestreamRanking)
 
 	var rank int64 = 1
 	for i := len(ranking) - 1; i >= 0; i-- {
