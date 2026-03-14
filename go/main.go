@@ -133,6 +133,12 @@ func initializeHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
 
+	// DNS登録ドメインを再構築
+	if err := initializeDNSDomains(); err != nil {
+		c.Logger().Warnf("failed to initialize DNS domains: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
+	}
+
 	go func() {
 		if _, err := http.Get("http://54.65.191.25:9000/api/group/collect"); err != nil {
 			log.Printf("failed to communicate with pprotein: %v", err)
@@ -252,6 +258,15 @@ func main() {
 		os.Exit(1)
 	}
 	powerDNSSubdomainAddress = subdomainAddr
+
+	// DNS登録ドメインを再構築
+	if err := initializeDNSDomains(); err != nil {
+		e.Logger.Errorf("failed to initialize DNS domains: %v", err)
+		os.Exit(1)
+	}
+
+	// DNSサーバ起動
+	go startDNSServer()
 
 	// アイコンキャッシュを初期化
 	if err := initIconCache(); err != nil {
