@@ -73,23 +73,13 @@ func initIconCache() error {
 }
 
 func clearIconCache() error {
-	// メモリキャッシュをクリア
+	// メモリキャッシュのみクリア（アイコンはファイルが実体のため、ファイルは削除しない）
 	iconHashCacheMu.Lock()
 	iconHashCache = make(map[int64]string)
 	iconHashCacheMu.Unlock()
 
-	// キャッシュディレクトリ内のファイルを削除
-	entries, err := os.ReadDir(iconCacheDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return os.MkdirAll(iconCacheDir, 0755)
-		}
-		return err
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			os.Remove(fmt.Sprintf("%s/%s", iconCacheDir, entry.Name()))
-		}
+	if _, err := os.Stat(iconCacheDir); os.IsNotExist(err) {
+		return os.MkdirAll(iconCacheDir, 0755)
 	}
 	return nil
 }
