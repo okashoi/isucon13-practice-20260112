@@ -132,6 +132,11 @@ func initializeHandler(c echo.Context) error {
 		c.Logger().Warnf("failed to warm up tags cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
 	}
+	clearUserScoreCache()
+	if err := warmUpUserScoreCache(c.Request().Context(), dbConn); err != nil {
+		c.Logger().Warnf("failed to warm up user score cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to initialize: "+err.Error())
+	}
 
 	go func() {
 		if _, err := http.Get("http://54.65.191.25:9000/api/group/collect"); err != nil {
@@ -160,6 +165,11 @@ func initializeCacheHandler(c echo.Context) error {
 	}
 	if err := warmUpTagsCache(c.Request().Context(), dbConn); err != nil {
 		c.Logger().Warnf("failed to warm up tags cache: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear cache: "+err.Error())
+	}
+	clearUserScoreCache()
+	if err := warmUpUserScoreCache(c.Request().Context(), dbConn); err != nil {
+		c.Logger().Warnf("failed to warm up user score cache: %v", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to clear cache: "+err.Error())
 	}
 	c.Request().Header.Add("Content-Type", "application/json;charset=utf-8")

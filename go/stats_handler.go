@@ -1,15 +1,83 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/labstack/echo/v4"
 	"golang.org/x/sync/singleflight"
 )
+
+// ユーザーランキングスコアのオンメモリキャッシュ (user_id -> score)
+var (
+	userScoreCache   = make(map[int64]int64)
+	userScoreCacheMu sync.RWMutex
+)
+
+func getUserScore(userID int64) int64 {
+	userScoreCacheMu.RLock()
+	defer userScoreCacheMu.RUnlock()
+	return userScoreCache[userID]
+}
+
+func addUserScore(userID int64, delta int64) {
+	if delta == 0 {
+		return
+	}
+	userScoreCacheMu.Lock()
+	userScoreCache[userID] += delta
+	userScoreCacheMu.Unlock()
+}
+
+func getAllUserScores() map[int64]int64 {
+	userScoreCacheMu.RLock()
+	defer userScoreCacheMu.RUnlock()
+	cp := make(map[int64]int64, len(userScoreCache))
+	for k, v := range userScoreCache {
+		cp[k] = v
+	}
+	return cp
+}
+
+func clearUserScoreCache() {
+	userScoreCacheMu.Lock()
+	userScoreCache = make(map[int64]int64)
+	userScoreCacheMu.Unlock()
+}
+
+type userScoreRow struct {
+	UserID int64 `db:"user_id"`
+	Score  int64 `db:"score"`
+}
+
+func warmUpUserScoreCache(ctx context.Context, db *sqlx.DB) error {
+	query := `
+		SELECT u.id AS user_id,
+		       IFNULL(SUM(r.reaction_count), 0) + IFNULL(SUM(lc.tip_sum), 0) AS score
+		FROM users u
+		LEFT JOIN livestreams l ON l.user_id = u.id
+		LEFT JOIN (SELECT livestream_id, COUNT(*) AS reaction_count FROM reactions GROUP BY livestream_id) r ON r.livestream_id = l.id
+		LEFT JOIN (SELECT livestream_id, SUM(tip) AS tip_sum FROM livecomments GROUP BY livestream_id) lc ON lc.livestream_id = l.id
+		GROUP BY u.id
+	`
+	var rows []userScoreRow
+	if err := db.SelectContext(ctx, &rows, query); err != nil {
+		return err
+	}
+	userScoreCacheMu.Lock()
+	userScoreCache = make(map[int64]int64, len(rows))
+	for _, r := range rows {
+		userScoreCache[r.UserID] = r.Score
+	}
+	userScoreCacheMu.Unlock()
+	return nil
+}
 
 type LivestreamStatistics struct {
 	Rank           int64 `json:"rank"`
@@ -60,15 +128,7 @@ func (r UserRanking) Less(i, j int) bool {
 	}
 }
 
-// UserScoreEntry はユーザーごとのスコア集計用
-type UserScoreEntry struct {
-	UserID   int64  `db:"user_id"`
-	Username string `db:"username"`
-	Score    int64  `db:"score"`
-}
-
 var (
-	userRankingSF       singleflight.Group
 	livestreamRankingSF singleflight.Group
 )
 
@@ -99,46 +159,30 @@ func getUserStatisticsHandler(c echo.Context) error {
 		}
 	}
 
-	// ランク算出: 全ユーザーのスコアを singleflight で一括取得（同時リクエストで共有）
-	rankingResult, err, _ := userRankingSF.Do("ranking", func() (interface{}, error) {
-		var scores []UserScoreEntry
-		rankQuery := `
-			SELECT
-				u.id AS user_id,
-				u.name AS username,
-				IFNULL(SUM(r.reaction_count), 0) + IFNULL(SUM(lc.tip_sum), 0) AS score
-			FROM users u
-			LEFT JOIN livestreams l ON l.user_id = u.id
-			LEFT JOIN (
-				SELECT livestream_id, COUNT(*) AS reaction_count
-				FROM reactions
-				GROUP BY livestream_id
-			) r ON r.livestream_id = l.id
-			LEFT JOIN (
-				SELECT livestream_id, SUM(tip) AS tip_sum
-				FROM livecomments
-				GROUP BY livestream_id
-			) lc ON lc.livestream_id = l.id
-			GROUP BY u.id, u.name
-		`
-		if err := dbConn.SelectContext(ctx, &scores, rankQuery); err != nil {
-			return nil, err
-		}
-
-		var ranking UserRanking
-		for _, us := range scores {
-			ranking = append(ranking, UserRankingEntry{
-				Username: us.Username,
-				Score:    us.Score,
-			})
-		}
-		sort.Sort(ranking)
-		return ranking, nil
-	})
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user scores: "+err.Error())
+	// ランク算出: オンメモリキャッシュから全ユーザーのスコアを取得
+	allScores := getAllUserScores()
+	userIDs := make([]int64, 0, len(allScores))
+	for uid := range allScores {
+		userIDs = append(userIDs, uid)
 	}
-	ranking := rankingResult.(UserRanking)
+	userModels, err := getUserModelsFromCacheOrDB(ctx, tx, userIDs)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get user models for ranking: "+err.Error())
+	}
+	userNameMap := make(map[int64]string, len(userModels))
+	for _, u := range userModels {
+		userNameMap[u.ID] = u.Name
+	}
+
+	var ranking UserRanking
+	for uid, score := range allScores {
+		name := userNameMap[uid]
+		ranking = append(ranking, UserRankingEntry{
+			Username: name,
+			Score:    score,
+		})
+	}
+	sort.Sort(ranking)
 
 	var rank int64 = 1
 	for i := len(ranking) - 1; i >= 0; i-- {

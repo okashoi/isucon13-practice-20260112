@@ -234,6 +234,8 @@ func postLivecommentHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
+	addUserScore(livestreamModel.UserID, livecommentModel.Tip)
+
 	return c.JSON(http.StatusCreated, livecomment)
 }
 
@@ -368,6 +370,12 @@ func moderateHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get last inserted NG word id: "+err.Error())
 	}
 
+	// 削除対象のコメントの tip 合計を先に取得（ユーザースコア減算用）
+	var deletedTipSum int64
+	if err := tx.GetContext(ctx, &deletedTipSum, "SELECT IFNULL(SUM(tip), 0) FROM livecomments WHERE livestream_id = ? AND comment LIKE CONCAT('%', ?, '%')", livestreamID, req.NGWord); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get tip sum of deleted livecomments: "+err.Error())
+	}
+
 	// 今回追加したNGワードにヒットする過去の投稿を削除する
 	if _, err := tx.ExecContext(ctx, "DELETE FROM livecomments WHERE livestream_id = ? AND comment LIKE CONCAT('%', ?, '%')", livestreamID, req.NGWord); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to delete old livecomments that hit spams: "+err.Error())
@@ -376,6 +384,8 @@ func moderateHandler(c echo.Context) error {
 	if err := tx.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
+
+	addUserScore(int64(userID), -deletedTipSum)
 
 	return c.JSON(http.StatusCreated, map[string]interface{}{
 		"word_id": wordID,

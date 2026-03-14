@@ -113,6 +113,11 @@ func postReactionHandler(c echo.Context) error {
 		CreatedAt:    time.Now().Unix(),
 	}
 
+	var livestreamOwnerID int64
+	if err := tx.GetContext(ctx, &livestreamOwnerID, "SELECT user_id FROM livestreams WHERE id = ?", livestreamID); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream owner: "+err.Error())
+	}
+
 	result, err := tx.NamedExecContext(ctx, "INSERT INTO reactions (user_id, livestream_id, emoji_name, created_at) VALUES (:user_id, :livestream_id, :emoji_name, :created_at)", reactionModel)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to insert reaction: "+err.Error())
@@ -132,6 +137,8 @@ func postReactionHandler(c echo.Context) error {
 	if err := tx.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
+
+	addUserScore(livestreamOwnerID, 1)
 
 	return c.JSON(http.StatusCreated, reaction)
 }
