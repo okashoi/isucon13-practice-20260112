@@ -404,7 +404,7 @@ func moderateHandler(c echo.Context) error {
 	}
 
 	// 早くしすぎると何故かスコア下がるのでsleep挟む
-	time.Sleep(1500 * time.Millisecond)
+	// time.Sleep(1500 * time.Millisecond)
 
 	tx, err := dbConn.BeginTxx(ctx, nil)
 	if err != nil {
@@ -454,7 +454,7 @@ func moderateHandler(c echo.Context) error {
 	if err := tx.Commit(); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
-	time.Sleep(time.Second * 5)
+	//time.Sleep(time.Second * 5)
 
 	return c.JSON(http.StatusCreated, map[string]interface{}{
 		"word_id": wordID,
