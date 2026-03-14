@@ -122,6 +122,7 @@ func initializeHandler(c echo.Context) error {
 	// テーマキャッシュをクリア
 	clearThemeCache()
 	clearUserCache()
+	clearLivestreamCache()
 	clearLivestreamTagsCache()
 	clearTagsCache()
 	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {
@@ -158,6 +159,7 @@ func initializeCacheHandler(c echo.Context) error {
 	}
 	clearThemeCache()
 	clearUserCache()
+	clearLivestreamCache()
 	clearLivestreamTagsCache()
 	clearTagsCache()
 	if err := warmUpLivestreamTagsCache(c.Request().Context(), dbConn); err != nil {

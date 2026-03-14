@@ -236,13 +236,16 @@ func getLivestreamStatisticsHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	var livestream LivestreamModel
-	if err := tx.GetContext(ctx, &livestream, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusBadRequest, "cannot get stats of not found livestream")
-		} else {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	livestream, ok := getLivestreamFromCache(livestreamID)
+	if !ok {
+		if err := tx.GetContext(ctx, &livestream, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusBadRequest, "cannot get stats of not found livestream")
+			} else {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+			}
 		}
+		setLivestreamCache(livestream)
 	}
 
 	// ランク算出: 全ライブストリームのスコアを singleflight で一括取得（同時リクエストで共有）

@@ -68,6 +68,80 @@ type ReservationSlotModel struct {
 	EndAt   int64 `db:"end_at" json:"end_at"`
 }
 
+// livestream のオンメモリキャッシュ（key: id）
+var (
+	livestreamCache   = make(map[int64]LivestreamModel)
+	livestreamCacheMu sync.RWMutex
+)
+
+func setLivestreamCache(ls LivestreamModel) {
+	livestreamCacheMu.Lock()
+	livestreamCache[ls.ID] = ls
+	livestreamCacheMu.Unlock()
+}
+
+func setLivestreamCacheBatch(models []LivestreamModel) {
+	if len(models) == 0 {
+		return
+	}
+	livestreamCacheMu.Lock()
+	for _, ls := range models {
+		livestreamCache[ls.ID] = ls
+	}
+	livestreamCacheMu.Unlock()
+}
+
+func getLivestreamFromCache(id int64) (LivestreamModel, bool) {
+	livestreamCacheMu.RLock()
+	ls, ok := livestreamCache[id]
+	livestreamCacheMu.RUnlock()
+	return ls, ok
+}
+
+func clearLivestreamCache() {
+	livestreamCacheMu.Lock()
+	livestreamCache = make(map[int64]LivestreamModel)
+	livestreamCacheMu.Unlock()
+}
+
+// getLivestreamModelsFromCacheOrDB は livestreamIDs に対応する LivestreamModel をキャッシュまたはDBから取得する
+func getLivestreamModelsFromCacheOrDB(ctx context.Context, tx *sqlx.Tx, livestreamIDs []int64) ([]LivestreamModel, error) {
+	if len(livestreamIDs) == 0 {
+		return []LivestreamModel{}, nil
+	}
+
+	idSet := make(map[int64]struct{})
+	for _, id := range livestreamIDs {
+		idSet[id] = struct{}{}
+	}
+
+	models := make([]LivestreamModel, 0, len(idSet))
+	uncachedIDs := make([]int64, 0, len(idSet))
+
+	for id := range idSet {
+		if ls, ok := getLivestreamFromCache(id); ok {
+			models = append(models, ls)
+		} else {
+			uncachedIDs = append(uncachedIDs, id)
+		}
+	}
+
+	if len(uncachedIDs) > 0 {
+		query, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", uncachedIDs)
+		if err != nil {
+			return nil, err
+		}
+		var fetched []LivestreamModel
+		if err := tx.SelectContext(ctx, &fetched, query, args...); err != nil {
+			return nil, err
+		}
+		setLivestreamCacheBatch(fetched)
+		models = append(models, fetched...)
+	}
+
+	return models, nil
+}
+
 // livestream_tags のオンメモリキャッシュ（key: livestream_id）
 var (
 	livestreamTagCache   = make(map[int64][]LivestreamTagModel)
@@ -200,6 +274,7 @@ func reserveLivestreamHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get last inserted livestream id: "+err.Error())
 	}
 	livestreamModel.ID = livestreamID
+	setLivestreamCache(*livestreamModel)
 
 	// タグ追加
 	tagModelsForCache := make([]LivestreamTagModel, 0, len(req.Tags))
@@ -264,12 +339,8 @@ func searchLivestreamsHandler(c echo.Context) error {
 				livestreamIDs = append(livestreamIDs, lt.LivestreamID)
 			}
 			if len(livestreamIDs) > 0 {
-				q, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+				fetched, err := getLivestreamModelsFromCacheOrDB(ctx, tx, livestreamIDs)
 				if err != nil {
-					return echo.NewHTTPError(http.StatusInternalServerError, "failed to construct IN query: "+err.Error())
-				}
-				var fetched []LivestreamModel
-				if err := tx.SelectContext(ctx, &fetched, q, args...); err != nil {
 					return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
 				}
 				byID := make(map[int64]*LivestreamModel, len(fetched))
@@ -297,6 +368,10 @@ func searchLivestreamsHandler(c echo.Context) error {
 
 		if err := tx.SelectContext(ctx, &livestreamModels, query); err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
+		}
+		// キャッシュに登録
+		for _, ls := range livestreamModels {
+			setLivestreamCache(*ls)
 		}
 	}
 
@@ -337,6 +412,9 @@ func getMyLivestreamsHandler(c echo.Context) error {
 	var livestreamModels []*LivestreamModel
 	if err := tx.SelectContext(ctx, &livestreamModels, "SELECT * FROM livestreams WHERE user_id = ?", userID); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
+	}
+	for _, ls := range livestreamModels {
+		setLivestreamCache(*ls)
 	}
 
 	// ポインタスライスを値スライスに変換
@@ -382,6 +460,9 @@ func getUserLivestreamsHandler(c echo.Context) error {
 	var livestreamModels []*LivestreamModel
 	if err := tx.SelectContext(ctx, &livestreamModels, "SELECT * FROM livestreams WHERE user_id = ?", user.ID); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
+	}
+	for _, ls := range livestreamModels {
+		setLivestreamCache(*ls)
 	}
 
 	// ポインタスライスを値スライスに変換
@@ -494,13 +575,16 @@ func getLivestreamHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	livestreamModel := LivestreamModel{}
-	err = tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return echo.NewHTTPError(http.StatusNotFound, "not found livestream that has the given id")
-	}
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok {
+		err = tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return echo.NewHTTPError(http.StatusNotFound, "not found livestream that has the given id")
+		}
+		if err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+		}
+		setLivestreamCache(livestreamModel)
 	}
 
 	livestream, err := fillLivestreamResponse(ctx, tx, livestreamModel)
@@ -533,9 +617,12 @@ func getLivecommentReportsHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	var livestreamModel LivestreamModel
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok {
+		if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+		}
+		setLivestreamCache(livestreamModel)
 	}
 
 	// error already check

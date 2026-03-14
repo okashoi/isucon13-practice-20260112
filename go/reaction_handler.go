@@ -180,13 +180,9 @@ func fillReactionsResponse(ctx context.Context, tx *sqlx.Tx, reactionModels []Re
 		userMap[u.ID] = users[i]
 	}
 
-	// livestreams を一括取得
-	query, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+	// livestreams をキャッシュまたはDBから一括取得
+	livestreamModels, err := getLivestreamModelsFromCacheOrDB(ctx, tx, livestreamIDs)
 	if err != nil {
-		return nil, err
-	}
-	var livestreamModels []LivestreamModel
-	if err := tx.SelectContext(ctx, &livestreamModels, query, args...); err != nil {
 		return nil, err
 	}
 	livestreams, err := fillLivestreamsResponse(ctx, tx, livestreamModels)

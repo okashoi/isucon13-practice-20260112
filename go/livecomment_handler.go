@@ -183,13 +183,16 @@ func postLivecommentHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	var livestreamModel LivestreamModel
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
-		} else {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok {
+		if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
+			} else {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+			}
 		}
+		setLivestreamCache(livestreamModel)
 	}
 
 	// スパム判定
@@ -265,13 +268,16 @@ func reportLivecommentHandler(c echo.Context) error {
 	}
 	defer tx.Rollback()
 
-	var livestreamModel LivestreamModel
-	if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
-		} else {
-			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok {
+		if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusNotFound, "livestream not found")
+			} else {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestream: "+err.Error())
+			}
 		}
+		setLivestreamCache(livestreamModel)
 	}
 
 	var livecommentModel LivecommentModel
@@ -345,11 +351,17 @@ func moderateHandler(c echo.Context) error {
 	defer tx.Rollback()
 
 	// 配信者自身の配信に対するmoderateなのかを検証
-	var ownedLivestreams []LivestreamModel
-	if err := tx.SelectContext(ctx, &ownedLivestreams, "SELECT * FROM livestreams WHERE id = ? AND user_id = ?", livestreamID, userID); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
+	livestreamModel, ok := getLivestreamFromCache(int64(livestreamID))
+	if !ok {
+		if err := tx.GetContext(ctx, &livestreamModel, "SELECT * FROM livestreams WHERE id = ?", livestreamID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return echo.NewHTTPError(http.StatusBadRequest, "A streamer can't moderate livestreams that other streamers own")
+			}
+			return echo.NewHTTPError(http.StatusInternalServerError, "failed to get livestreams: "+err.Error())
+		}
+		setLivestreamCache(livestreamModel)
 	}
-	if len(ownedLivestreams) == 0 {
+	if livestreamModel.UserID != int64(userID) {
 		return echo.NewHTTPError(http.StatusBadRequest, "A streamer can't moderate livestreams that other streamers own")
 	}
 
@@ -426,13 +438,9 @@ func fillLivecommentsResponse(ctx context.Context, tx *sqlx.Tx, livecommentModel
 		userMap[u.ID] = users[i]
 	}
 
-	// livestreams を一括取得
-	query, args, err := sqlx.In("SELECT * FROM livestreams WHERE id IN (?)", livestreamIDs)
+	// livestreams をキャッシュまたはDBから一括取得
+	livestreamModels, err := getLivestreamModelsFromCacheOrDB(ctx, tx, livestreamIDs)
 	if err != nil {
-		return nil, err
-	}
-	var livestreamModels []LivestreamModel
-	if err := tx.SelectContext(ctx, &livestreamModels, query, args...); err != nil {
 		return nil, err
 	}
 	livestreams, err := fillLivestreamsResponse(ctx, tx, livestreamModels)
