@@ -31,8 +31,14 @@ const (
 
 var fallbackImage = "../img/NoImage.jpg"
 
-// アイコンキャッシュ用ディレクトリ
+// アイコンキャッシュ用ディレクトリ（環境変数 ISUCON13_ICON_CACHE_DIR で上書き可能）
 var iconCacheDir = "../icons"
+
+func init() {
+	if v, ok := os.LookupEnv("ISUCON13_ICON_CACHE_DIR"); ok {
+		iconCacheDir = v
+	}
+}
 
 // アイコンハッシュのメモリキャッシュ
 var (
@@ -94,8 +100,8 @@ func clearIconCache() error {
 	return nil
 }
 
-func getIconPath(userID int64) string {
-	return fmt.Sprintf("%s/%d.jpg", iconCacheDir, userID)
+func getIconPath(username string) string {
+	return fmt.Sprintf("%s/%s.jpg", iconCacheDir, username)
 }
 
 func getIconHash(userID int64) (string, bool) {
@@ -273,7 +279,7 @@ func getIconHandler(c echo.Context) error {
 	iconHash, hashCached := getIconHash(user.ID)
 
 	// ファイルシステムからアイコンを読み込む
-	iconPath := getIconPath(user.ID)
+	iconPath := getIconPath(user.Name)
 	if _, err := os.Stat(iconPath); err == nil {
 		// ファイルが存在する場合
 		// ハッシュがキャッシュされていない場合は計算
@@ -347,6 +353,7 @@ func postIconHandler(c echo.Context) error {
 	sess, _ := session.Get(defaultSessionIDKey, c)
 	// existence already checked
 	userID := sess.Values[defaultUserIDKey].(int64)
+	username := sess.Values[defaultUsernameKey].(string)
 
 	var req *PostIconRequest
 	if err := json.UnmarshalRead(c.Request().Body, &req); err != nil {
@@ -378,7 +385,7 @@ func postIconHandler(c echo.Context) error {
 	}
 
 	// ファイルシステムにも保存（キャッシュ）
-	iconPath := getIconPath(userID)
+	iconPath := getIconPath(username)
 	if err := os.WriteFile(iconPath, req.Image, 0644); err != nil {
 		c.Logger().Warnf("failed to cache icon: %v", err)
 	}
@@ -679,6 +686,12 @@ func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel)
 		}
 	}
 
+	// userID -> username のマップを構築（アイコンファイル保存時に使用）
+	userIDToName := make(map[int64]string, len(userModels))
+	for _, u := range userModels {
+		userIDToName[u.ID] = u.Name
+	}
+
 	// メモリキャッシュにないユーザーIDを収集（main と同じ: キャッシュ優先、未キャッシュのみDB取得）
 	var uncachedUserIDs []int64
 	iconHashMap := make(map[int64]string)
@@ -705,9 +718,11 @@ func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel)
 			iconHashMap[icon.UserID] = hashStr
 			setIconHash(icon.UserID, hashStr)
 			iconUserIDSet[icon.UserID] = struct{}{}
-			iconPath := getIconPath(icon.UserID)
-			if _, err := os.Stat(iconPath); os.IsNotExist(err) {
-				os.WriteFile(iconPath, icon.Image, 0644)
+			if name, ok := userIDToName[icon.UserID]; ok {
+				iconPath := getIconPath(name)
+				if _, err := os.Stat(iconPath); os.IsNotExist(err) {
+					os.WriteFile(iconPath, icon.Image, 0644)
+				}
 			}
 		}
 		for _, userID := range uncachedUserIDs {
