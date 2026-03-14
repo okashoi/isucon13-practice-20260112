@@ -134,7 +134,7 @@ func initializeHandler(c echo.Context) error {
 	}
 
 	go func() {
-		if _, err := http.Get("http://52.196.128.84:9000/api/group/collect"); err != nil {
+		if _, err := http.Get("http://54.65.191.25:9000/api/group/collect"); err != nil {
 			log.Printf("failed to communicate with pprotein: %v", err)
 		}
 	}()
