@@ -93,8 +93,8 @@ func clearIconCache() error {
 	return nil
 }
 
-func getIconPath(userID int64) string {
-	return fmt.Sprintf("%s/%d.jpg", iconCacheDir, userID)
+func getIconPath(username string) string {
+	return fmt.Sprintf("%s/%s.jpg", iconCacheDir, username)
 }
 
 func getIconHash(userID int64) (string, bool) {
@@ -272,7 +272,7 @@ func getIconHandler(c echo.Context) error {
 	iconHash, hashCached := getIconHash(user.ID)
 
 	// ファイルシステムからアイコンを読み込む
-	iconPath := getIconPath(user.ID)
+	iconPath := getIconPath(user.Name)
 	if _, err := os.Stat(iconPath); err == nil {
 		// ファイルが存在する場合
 		// ハッシュがキャッシュされていない場合は計算
@@ -376,10 +376,12 @@ func postIconHandler(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to commit: "+err.Error())
 	}
 
-	// ファイルシステムにも保存（キャッシュ）
-	iconPath := getIconPath(userID)
-	if err := os.WriteFile(iconPath, req.Image, 0644); err != nil {
-		c.Logger().Warnf("failed to cache icon: %v", err)
+	// ファイルシステムにも保存（キャッシュ）- username ベースで保存
+	if u, ok := getUserFromCache(userID); ok {
+		iconPath := getIconPath(u.Name)
+		if err := os.WriteFile(iconPath, req.Image, 0644); err != nil {
+			c.Logger().Warnf("failed to cache icon: %v", err)
+		}
 	}
 
 	// ハッシュを計算してメモリキャッシュに保存
@@ -708,6 +710,11 @@ func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel)
 		if err := tx.SelectContext(ctx, &iconModels, iconQuery, iconArgs...); err != nil {
 			return nil, err
 		}
+		// userID → username のマップを作成
+		userNameMap := make(map[int64]string, len(userModels))
+		for _, u := range userModels {
+			userNameMap[u.ID] = u.Name
+		}
 		iconUserIDSet := make(map[int64]struct{})
 		for _, icon := range iconModels {
 			hash := sha256.Sum256(icon.Image)
@@ -715,9 +722,11 @@ func fillUsersResponse(ctx context.Context, tx *sqlx.Tx, userModels []UserModel)
 			iconHashMap[icon.UserID] = hashStr
 			setIconHash(icon.UserID, hashStr)
 			iconUserIDSet[icon.UserID] = struct{}{}
-			iconPath := getIconPath(icon.UserID)
-			if _, err := os.Stat(iconPath); os.IsNotExist(err) {
-				os.WriteFile(iconPath, icon.Image, 0644)
+			if name, ok := userNameMap[icon.UserID]; ok {
+				iconPath := getIconPath(name)
+				if _, err := os.Stat(iconPath); os.IsNotExist(err) {
+					os.WriteFile(iconPath, icon.Image, 0644)
+				}
 			}
 		}
 		for _, userID := range uncachedUserIDs {
