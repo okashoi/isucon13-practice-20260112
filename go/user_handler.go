@@ -480,13 +480,10 @@ func registerHandler(c echo.Context) error {
 		UserID:   userID,
 		DarkMode: req.Theme.DarkMode,
 	}
-	if _, err := tx.NamedExecContext(ctx, "INSERT INTO themes (user_id, dark_mode) VALUES(:user_id, :dark_mode)", themeModel); err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to insert user theme: "+err.Error())
-	}
 
-	user, err := fillUserResponse(ctx, tx, userModel)
+	themeResult, err := tx.NamedExecContext(ctx, "INSERT INTO themes (user_id, dark_mode) VALUES(:user_id, :dark_mode)", themeModel)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "failed to fill user: "+err.Error())
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to insert user theme: "+err.Error())
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -494,7 +491,23 @@ func registerHandler(c echo.Context) error {
 	}
 
 	registerDNSDomain(req.Name)
+
+	themeID, _ := themeResult.LastInsertId()
+
 	setUserCacheBatch([]UserModel{userModel})
+	setThemeCache(ThemeModel{ID: themeID, UserID: userID, DarkMode: req.Theme.DarkMode})
+
+	user := User{
+		ID:          userModel.ID,
+		Name:        userModel.Name,
+		DisplayName: userModel.DisplayName,
+		Description: userModel.Description,
+		Theme: Theme{
+			ID:       themeID,
+			DarkMode: req.Theme.DarkMode,
+		},
+		IconHash: fallbackImageHash,
+	}
 
 	return c.JSON(http.StatusCreated, user)
 }
